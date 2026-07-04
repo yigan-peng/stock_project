@@ -1,209 +1,307 @@
+<!-- HTML文档声明 -->
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN">                     <!-- 中文语言 -->
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>行业资金流向图</title>
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            background: #0d1117; 
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            overflow: hidden;
-            height: 100vh;
-        }
-        #chart {
-            width: 100%;
-            height: 85vh;
-        }
-        .header {
-            color: #c9d1d9;
-            padding: 10px 16px 0;
-            font-size: 18px;
-            font-weight: bold;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .status {
-            font-size: 12px;
-            color: #8b949e;
-            font-weight: normal;
-        }
-        .legend-wrapper {
-            padding: 4px 12px;
-            overflow-x: auto;
-            white-space: nowrap;
-            -webkit-overflow-scrolling: touch;
-        }
-        .legend-item {
-            display: inline-block;
-            font-size: 11px;
-            color: #8b949e;
-            margin-right: 12px;
-            padding: 2px 6px;
-            border-radius: 4px;
-            background: #161b22;
-        }
-        .legend-item.up { color: #f23645; }
-        .legend-item.down { color: #00c853; }
-    </style>
+<meta charset="UTF-8">                   <!-- 字符编码UTF-8 -->
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">  <!-- 移动端适配：禁止缩放 -->
+<title>行业资金流向</title>               <!-- 页面标题 -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>  <!-- 引入ECharts图表库（CDN） -->
+<style>
+/* ===== 全局重置：清除默认边距 ===== */
+*{margin:0;padding:0;box-sizing:border-box}  /* 所有元素：0边距，边框计入宽高 */
+/* ===== 页面主体：深色背景，全屏高度，纵向弹性布局 ===== */
+body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column}
+/* ===== 顶部工具栏：水平排列按钮和状态 ===== */
+.hdr{padding:6px 14px;display:flex;align-items:center;gap:10px;color:#c9d1d9;font-size:14px;flex-shrink:0;flex-wrap:wrap}
+/* ===== 按钮基础样式 ===== */
+.hdr button{color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap}
+/* ===== 按钮禁用样式：半透明+禁止光标 ===== */
+.hdr button:disabled{opacity:0.5;cursor:not-allowed}
+/* ===== 三种按钮颜色 ===== */
+.btn-green{background:#238636}           /* 绿色：确认/更新操作 */
+.btn-red{background:#da3633}             /* 红色：停止/危险操作 */
+.btn-blue{background:#1f6feb}            /* 蓝色：启动/信息操作 */
+/* ===== 分隔线（按钮组之间的竖线） ===== */
+.hdr .sep{width:1px;height:20px;background:#30363d}
+/* ===== 状态文字样式（小字灰色） ===== */
+.st{font-size:10px;color:#8b949e}
+/* ===== 图表容器：占据剩余空间 ===== */
+.chart-wrap{flex:1;position:relative;min-height:0}  /* flex:1 自动填满剩余高度 */
+/* ===== 图表标题（左上角悬浮文字） ===== */
+.chart-title{position:absolute;top:4px;left:14px;color:#8b949e;font-size:11px;z-index:1}
+/* ===== 两个图表之间的分隔线 ===== */
+.divider{height:1px;background:#21262d;flex-shrink:0}
+</style>
 </head>
 <body>
-    <div class="header">
-        <span>📊 行业资金流向</span>
-        <span class="status" id="status">等待数据...</span>
-    </div>
-    <div id="chart"></div>
+<!-- ===== 顶部工具栏区域 ===== -->
+<div class="hdr">
+  <span>📊 行业资金流向</span>          <!-- 页面标题文字 -->
+  <!-- 按钮1：刷新每日数据（绿色） -->
+  <button id="btnDaily" class="btn-green" onclick="doDailyRefresh()">🔄 更新数据(每日)</button>
+  <div class="sep"></div>               <!-- 竖线分隔 -->
+  <!-- 按钮2：启动分时采集（蓝色） -->
+  <button id="btnStart" class="btn-blue" onclick="doStartCollection()">▶ 开始自动获取当天数据</button>
+  <!-- 按钮3：停止分时采集（红色），默认禁用 -->
+  <button id="btnStop" class="btn-red" onclick="doStopCollection()" disabled>⏹ 结束自动获取当天数据</button>
+  <!-- 按钮4：将分时数据合并到每日（绿色） -->
+  <button id="btnMerge" class="btn-green" onclick="doMergeIntraday()">🔀 将分时数据合并到每日</button>
+  <div class="sep"></div>               <!-- 竖线分隔 -->
+  <!-- 状态显示文字 -->
+  <span class="st" id="stDaily">每日: 加载中…</span>     <!-- 每日数据状态 -->
+  <span class="st" id="stIntraday">分时: 加载中…</span>  <!-- 分时数据状态 -->
+</div>
+<!-- ===== 上方图表：每日净流入（近20交易日） ===== -->
+<div class="chart-wrap" id="dailyWrap">
+  <div class="chart-title">每日净流入(亿元) · 近20交易日</div>  <!-- 图表标题 -->
+  <div id="chartDaily" style="width:100%;height:100%"></div>    <!-- ECharts渲染容器 -->
+</div>
+<!-- ===== 中间分隔线 ===== -->
+<div class="divider"></div>
+<!-- ===== 下方图表：当天分时净流入（240分钟） ===== -->
+<div class="chart-wrap" id="intradayWrap">
+  <div class="chart-title">当天分时净流入(亿元) · 240分钟</div>  <!-- 图表标题 -->
+  <div id="chartIntraday" style="width:100%;height:100%"></div>  <!-- ECharts渲染容器 -->
+</div>
 
-    <script>
-        const chart = echarts.init(document.getElementById('chart'), null, {
-            width: 'auto',
-            height: 'auto'
-        });
+<script>
+// ==================== 初始化图表实例 ====================
+// 获取DOM元素并创建ECharts实例（每个div一个独立图表）
+const chartDaily = echarts.init(document.getElementById('chartDaily'));      // 上方：每日图表
+const chartIntraday = echarts.init(document.getElementById('chartIntraday')); // 下方：分时图表
 
-        // 存储每个板块的历史数据
-        const sectorData = {};
-        let currentOrder = [];
-        let lastUpdateTime = Date.now();
+// ==================== 获取DOM元素引用 ====================
+const stDaily = document.getElementById('stDaily');       // 每日状态文字元素
+const stIntraday = document.getElementById('stIntraday'); // 分时状态文字元素
+const btnDaily = document.getElementById('btnDaily');     // 每日刷新按钮
+const btnStart = document.getElementById('btnStart');     // 开始采集按钮
+const btnStop = document.getElementById('btnStop');       // 停止采集按钮
 
-        // 连接 WebSocket
-        function connect() {
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${location.host}/ws`;
-            const ws = new WebSocket(wsUrl);
+// ==================== 20种颜色（循环使用给20个行业） ====================
+const C=['#f23645','#ff7549','#ffa657','#53b483','#2b908f',  // 红/橙/绿/青系列
+         '#3b82f6','#6366f1','#8b5cf6','#a855f7','#d946ef',  // 蓝/紫系列
+         '#06b6d4','#84cc16','#fbbf24','#fb923c','#34d399',  // 青/黄/绿系列
+         '#e879f9','#38bdf8','#a3e635','#fb7185','#818cf8']; // 粉/蓝/绿系列
 
-            ws.onopen = () => {
-                document.getElementById('status').textContent = '🟢 实时连接中';
-                document.getElementById('status').style.color = '#00c853';
-            };
+let pollTimer = null;  // 轮询定时器ID（用于采集期间每3秒刷新图表和状态）
 
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.length === 0) {
-                    document.getElementById('status').textContent = '⏸ 非交易时间';
-                    document.getElementById('status').style.color = '#ff9800';
-                    return;
-                }
+// ==================== 通用图表配置生成 ====================
+/**
+ * 根据数据生成ECharts配置项
+ * res: API返回的数据对象 {date, time_points, sectors}
+ * yName: Y轴名称（如"净流入(亿元)"）
+ * 返回: ECharts option对象 或 null（无数据时）
+ */
+function makeOption(res, yName) {
+  // 数据无效时返回null
+  if (!res || res.error || !res.sectors || res.sectors.length===0) return null;
+  return {
+    backgroundColor: '#0d1117',         // 深色背景（与页面一致）
+    // 鼠标悬浮提示框
+    tooltip: {trigger:'axis', backgroundColor:'#1c2333', borderColor:'#30363d',
+              textStyle:{color:'#c9d1d9',fontSize:10}},
+    // 图例（右上角可滚动，显示行业名）
+    legend: {data: res.sectors.map(s=>s.name), textStyle:{color:'#8b949e',fontSize:9},
+             top:22, right:14, type:'scroll', icon:'circle', itemWidth:7, itemHeight:7, itemGap:8},
+    // 图表网格区域（留出标题和图例空间）
+    grid: {left:'50px',right:'14px',bottom:'10px',top:62,containLabel:true},
+    // X轴：分类轴，数据为时间点/日期
+    xAxis: {type:'category', data:res.time_points,
+            axisLine:{lineStyle:{color:'#30363d'}}, axisLabel:{color:'#8b949e',fontSize:10}},
+    // Y轴：数值轴，显示净流入金额
+    yAxis: {type:'value', name:yName, nameTextStyle:{color:'#8b949e',fontSize:9},
+            axisLine:{lineStyle:{color:'#30363d'}}, axisLabel:{color:'#8b949e',fontSize:9},
+            splitLine:{lineStyle:{color:'#21262d'}}},  // 水平网格线
+    // 数据系列：每个行业一条曲线
+    series: res.sectors.map((s,i)=>({
+      name:s.name,                      // 行业名（对应图例）
+      type:'line',                      // 折线图
+      smooth:true,                      // 平滑曲线
+      symbol:'circle',                  // 数据点形状：圆点
+      symbolSize:4,                     // 数据点大小
+      lineStyle:{width:1.5,color:C[i%C.length]},  // 线条样式（颜色循环取）
+      itemStyle:{color:C[i%C.length]},  // 数据点颜色
+      data: s.values.map((v,t)=>[res.time_points[t], v??0])  // 数据对：[时间点, 值]
+    }))
+  };
+}
 
-                const now = Date.now();
-                lastUpdateTime = now;
+// ==================== 渲染每日图表 ====================
+/**
+ * 将API返回的每日数据渲染到上方图表
+ * res: {date, time_points: ["06-20",...], sectors: [{name, values},...]}
+ */
+function renderDaily(res) {
+  if (res.error) { stDaily.textContent = '每日: ' + res.error; return; }  // 错误提示
+  // 更新状态文字：显示日期和数据天数
+  stDaily.textContent = '每日: ' + res.date + ' (' + res.time_points.length + '天)';
+  const opt = makeOption(res, '净流入(亿元)');  // 生成图表配置
+  if (opt) chartDaily.setOption(opt);           // 渲染到图表
+}
 
-                // 更新状态
-                const date = new Date();
-                const timeStr = `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}:${String(date.getSeconds()).padStart(2,'0')}`;
-                document.getElementById('status').textContent = `🟢 ${timeStr}`;
-                document.getElementById('status').style.color = '#00c853';
+// ==================== 渲染分时图表 ====================
+/**
+ * 将API返回的分时数据渲染到下方图表
+ * res: {date, time_points: ["09:31",...], sectors: [{name, values:[240个]},...]}
+ */
+function renderIntraday(res) {
+  if (!res || res.error) { stIntraday.textContent = '分时: 暂无数据'; return; }
+  // 计算已采集的点数（第一个行业中非零值的个数）
+  const filled = res.sectors && res.sectors.length > 0
+    ? res.sectors[0].values.filter(v => v !== 0).length : 0;
+  // 更新状态文字：显示采集进度
+  stIntraday.textContent = `分时: ${filled}/240 点已采集`;
+  const opt = makeOption(res, '净流入(亿元)');  // 生成图表配置
+  if (opt) chartIntraday.setOption(opt);           // 渲染到图表
+}
 
-                // 更新数据
-                data.forEach(item => {
-                    if (!sectorData[item.name]) {
-                        sectorData[item.name] = [];
-                    }
-                    // 只保留最近200个数据点，防止内存溢出
-                    if (sectorData[item.name].length > 300) {
-                        sectorData[item.name].shift();
-                    }
-                    sectorData[item.name].push([now, item.net / 100000000]); // 转为亿元
-                });
+// ==================== 按钮操作：刷新每日数据 ====================
+/**
+ * 点击"🔄 更新数据(每日)"按钮触发
+ * 调用后端API从同花顺获取20天每日数据
+ */
+function doDailyRefresh() {
+  btnDaily.disabled = true;                       // 禁用按钮（防止重复点击）
+  stDaily.textContent = '每日: 更新中...';        // 显示加载状态
+  fetch('/api/daily/refresh', {method:'POST'})    // POST请求后端刷新API
+    .then(r=>r.json())                            // 解析JSON响应
+    .then(j=>{
+      if (j.error) { stDaily.textContent = '每日: ' + j.error; return; }  // 错误处理
+      renderDaily(j);                             // 渲染图表
+    })
+    .catch(e=>{stDaily.textContent='每日: 请求失败'})  // 网络错误
+    .finally(()=>btnDaily.disabled=false);        // 恢复按钮
+}
 
-                // 保持排序一致
-                currentOrder = data.map(d => d.name);
+// ==================== 按钮操作：开始分时采集 ====================
+/**
+ * 点击"▶ 开始自动获取当天数据"按钮触发
+ * 通知后端启动分时采集线程，并开始轮询刷新图表
+ */
+function doStartCollection() {
+  btnStart.disabled = true;                       // 禁用开始按钮
+  stIntraday.textContent = '分时: 启动中...';     // 显示启动状态
+  fetch('/api/intraday/start', {method:'POST'})   // POST请求启动API
+    .then(r=>r.json())
+    .then(j=>{
+      if (j.success) {                            // 启动成功
+        stIntraday.textContent = '分时: 采集中(0/240)';  // 显示进度
+        btnStop.disabled = false;                 // 启用停止按钮
+        startPolling();                           // 开始轮询（每3秒刷新图表）
+      } else {                                    // 启动失败
+        stIntraday.textContent = '分时: ' + j.message;
+        btnStart.disabled = false;                // 恢复开始按钮
+      }
+    })
+    .catch(e=>{
+      stIntraday.textContent = '分时: 请求失败';
+      btnStart.disabled = false;
+    });
+}
 
-                updateChart();
-            };
+// ==================== 按钮操作：停止分时采集 ====================
+/**
+ * 点击"⏹ 结束自动获取当天数据"按钮触发
+ * 通知后端停止采集线程
+ */
+function doStopCollection() {
+  btnStop.disabled = true;                        // 禁用停止按钮
+  stIntraday.textContent = '分时: 停止中...';
+  fetch('/api/intraday/stop', {method:'POST'})    // POST请求停止API
+    .then(r=>r.json())
+    .then(j=>{
+      stIntraday.textContent = '分时: ' + j.message;  // 显示停止信息
+      btnStart.disabled = false;                  // 恢复开始按钮
+      stopPolling();                              // 停止轮询
+      refreshIntradayChart();                     // 最后刷新一次图表
+    })
+    .catch(e=>{
+      stIntraday.textContent = '分时: 停止失败';
+      btnStop.disabled = false;
+    });
+}
 
-            ws.onclose = () => {
-                document.getElementById('status').textContent = '🔴 连接断开，3秒后重连...';
-                document.getElementById('status').style.color = '#f23645';
-                setTimeout(connect, 3000);
-            };
+// ==================== 轮询机制（采集期间自动刷新） ====================
+/**
+ * 启动轮询：每3秒请求一次后端状态和最新数据
+ * 用于采集期间实时更新图表和进度
+ */
+function startPolling() {
+  stopPolling();                                  // 先清除已有定时器（防止重复）
+  pollTimer = setInterval(() => {                 // 每3000ms执行一次
+    // 请求采集状态
+    fetch('/api/intraday/status').then(r=>r.json()).then(s=>{
+      if (!s.active) {                            // 采集已结束（240点完成或手动停止）
+        stopPolling();                            // 停止轮询
+        btnStart.disabled = false;                // 恢复开始按钮
+        btnStop.disabled = true;                  // 禁用停止按钮
+        stIntraday.textContent = `分时: 采集完成 ${s.current_idx}/240 点`;
+      } else {                                    // 采集中
+        stIntraday.textContent = `分时: 采集中(${s.current_idx}/240)`;
+      }
+    });
+    // 刷新分时图表（获取最新已采集的数据）
+    refreshIntradayChart();
+  }, 3000);                                       // 间隔3秒
+}
 
-            ws.onerror = () => {
-                ws.close();
-            };
-        }
+/**
+ * 停止轮询
+ */
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }  // 清除定时器
+}
 
-        function updateChart() {
-            const colors = [
-                '#f23645', '#ff7549', '#ffa657', '#ffcd70',
-                '#89d185', '#53b483', '#2b908f', '#3b82f6',
-                '#6366f1', '#8b5cf6', '#a855f7', '#d946ef'
-            ];
+/**
+ * 刷新分时图表（从后端获取最新数据并渲染）
+ */
+function refreshIntradayChart() {
+  fetch('/api/intraday/history').then(r=>r.json()).then(renderIntraday);
+}
 
-            // 构建 series
-            const series = currentOrder.map((name, index) => {
-                const data = sectorData[name] || [];
-                const colorIndex = index % colors.length;
-                return {
-                    name: name,
-                    type: 'line',
-                    stack: 'total',
-                    smooth: true,
-                    symbol: 'none',
-                    lineStyle: { width: 1.5 },
-                    areaStyle: {
-                        opacity: 0.6,
-                        color: data.length > 0 && data[data.length-1][1] >= 0 
-                            ? colors[colorIndex] 
-                            : '#374151'
-                    },
-                    data: data
-                };
-            });
+// ==================== 按钮操作：将分时数据合并到每日 ====================
+/**
+ * 点击"🔀 将分时数据合并到每日"按钮触发
+ * 将分时最新数据滑入每日数据（丢弃最远一天）
+ */
+function doMergeIntraday() {
+  const btn = document.getElementById('btnMerge');  // 获取合并按钮
+  btn.disabled = true;                              // 禁用按钮
+  stDaily.textContent = '每日: 合并中...';          // 显示合并状态
+  fetch('/api/daily/merge_intraday', {method:'POST'})  // POST请求合并API
+    .then(r=>r.json())
+    .then(j=>{
+      if (j.error) {                                // 合并失败
+        stDaily.textContent = '每日: ' + j.error;
+      } else {                                      // 合并成功
+        renderDaily(j);                             // 渲染更新后的每日图表
+        stDaily.textContent = '每日: 已合并分时数据 (' + j.time_points.length + '天)';
+      }
+    })
+    .catch(e=>{stDaily.textContent='每日: 合并失败'})  // 网络错误
+    .finally(()=>btn.disabled=false);               // 恢复按钮
+}
 
-            const option = {
-                backgroundColor: '#0d1117',
-                tooltip: {
-                    trigger: 'axis',
-                    axisPointer: { type: 'cross' },
-                    backgroundColor: '#1c2333',
-                    borderColor: '#30363d',
-                    textStyle: { color: '#c9d1d9', fontSize: 12 }
-                },
-                legend: {
-                    data: currentOrder,
-                    textStyle: { color: '#8b949e', fontSize: 10 },
-                    top: 40,
-                    type: 'scroll',
-                    pageIconColor: '#30363d',
-                    pageIconInactiveColor: '#21262d',
-                    pageTextStyle: { color: '#8b949e' }
-                },
-                grid: {
-                    left: '3%',
-                    right: '4%',
-                    bottom: '3%',
-                    containLabel: true
-                },
-                xAxis: {
-                    type: 'time',
-                    axisLine: { lineStyle: { color: '#30363d' } },
-                    axisLabel: { color: '#8b949e', fontSize: 10 },
-                    splitLine: { show: false }
-                },
-                yAxis: {
-                    type: 'value',
-                    name: '净流入 (亿元)',
-                    nameTextStyle: { color: '#8b949e', fontSize: 10 },
-                    axisLine: { lineStyle: { color: '#30363d' } },
-                    axisLabel: { color: '#8b949e', fontSize: 10 },
-                    splitLine: { lineStyle: { color: '#21262d' } }
-                },
-                series: series
-            };
+// ==================== 页面初始加载 ====================
+// 加载每日数据并渲染
+fetch('/api/daily/history').then(r=>r.json()).then(renderDaily);
+// 加载分时数据并渲染
+refreshIntradayChart();
 
-            chart.setOption(option, true);
-        }
+// ==================== 检查是否有正在进行的采集 ====================
+// 页面刷新后检查后端状态，如果正在采集则恢复轮询
+fetch('/api/intraday/status').then(r=>r.json()).then(s=>{
+  if (s.active) {                                   // 后端正在采集
+    btnStart.disabled = true;                       // 禁用开始按钮
+    btnStop.disabled = false;                       // 启用停止按钮
+    stIntraday.textContent = `分时: 采集中(${s.current_idx}/240)`;  // 显示当前进度
+    startPolling();                                 // 恢复轮询
+  }
+});
 
-        // 窗口大小变化时自适应
-        window.addEventListener('resize', () => {
-            chart.resize();
-        });
-
-        // 启动连接
-        connect();
-    </script>
+// ==================== 窗口大小变化时自适应 ====================
+// 浏览器窗口大小改变时重新计算图表尺寸
+window.addEventListener('resize', ()=>{ chartDaily.resize(); chartIntraday.resize(); });
+</script>
 </body>
 </html>
