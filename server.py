@@ -241,6 +241,19 @@ def _fetch_snapshot():
         result = {}                     # 构建结果字典
         for _, row in df.iterrows():    # 遍历每一行（每个行业）
             result[str(row["行业"])] = round(float(row["净额"]), 2)  # 行业名→净流入值（保留2位小数）
+
+        # ========== 新增打印 ==========
+        sorted_items = sorted(result.items(), key=lambda x: x[1], reverse=True)
+        print(f"\n📊 当前全行业资金流向快照 ({len(result)} 个行业):")
+        print("-" * 48)
+        max_val_len = max(len(f"{v:+.2f}") for v in result.values())
+        for rank, (name, value) in enumerate(sorted_items, 1):
+            sign = "+" if value > 0 else ""
+            num_str = f"{sign}{value:.2f}"
+            print(f"  {rank:2d}. {name:<8s}  {num_str:>{max_val_len}} 亿")
+        print("-" * 48)
+        # ==============================
+
         return result                   # 返回 {"行业1": 值1, "行业2": 值2, ...}
     except Exception as e:
         print(f"❌ 快照获取失败: {e}")   # 打印错误信息
