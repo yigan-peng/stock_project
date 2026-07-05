@@ -58,11 +58,33 @@ def _get_intraday_time_points():
 INTRADAY_POINTS = _get_intraday_time_points()  # 启动时生成一次，作为全局常量（240个时间点的列表）
 assert len(INTRADAY_POINTS) == 240, f"Expected 240, got {len(INTRADAY_POINTS)}"  # 断言检查：确保正好240个点，否则程序崩溃
 
+def _gen_time_labels(start_dt, max_points=240):
+    """从指定时间开始，动态生成最多max_points个分钟时间标签，跳过午休(11:31~12:59)"""
+    labels = []
+    h, m = start_dt.hour, start_dt.minute
+    while len(labels) < max_points:
+        # 跳过午休时段
+        if h == 11 and m > 30:
+            h, m = 13, 1                # 跳到13:01
+        elif h == 12:
+            h, m = 13, 1                # 跳到13:01
+        elif h >= 15 and m > 0:
+            break                        # 超过15:00，停止
+        elif h >= 16:
+            break                        # 超过16:00，停止
+        labels.append(f"{h:02d}:{m:02d}")  # 添加到标签列表
+        m += 1                           # 下一分钟
+        if m >= 60:
+            m = 0
+            h += 1
+    return labels
+
 # ==================== 分时采集线程状态变量 ====================
 _collection_thread: threading.Thread | None = None  # 分时采集的后台线程对象
 _collection_stop = threading.Event()    # 线程停止信号标志位，set()时线程退出循环
-_collection_idx = 0                     # 当前正在采集第几个点（0~239），也是进度指示器
+_collection_idx = 0                     # 当前正在采集第几个点（0~N），也是进度指示器
 _collection_active = False              # 采集是否正在进行中的标志
+_collection_total = 240                 # 本次采集的总点数（动态，可能小于240）
 
 # ==================== 数据库操作函数 ====================
 def get_db(path):
@@ -243,7 +265,9 @@ def _fetch_cumulative_fund_flow():
         "20日": "http://data.10jqka.com.cn/funds/hyzjl/board/20/field/tradezdf/order/desc/page/{}/ajax/1/free/1/",
     }
     result = {}                         # 存放5个窗口的结果
-    for period, url_tpl in urls.items():  # 遍历每个时间窗口
+    for i, (period, url_tpl) in enumerate(urls.items()):  # 遍历每个时间窗口
+        if i > 0:                       # 第一个请求前不等待
+            time.sleep(3)               # 每个窗口之间间隔3秒，防止限频
         try:
             df = _fetch_ths_page(url_tpl)  # 请求该窗口的页面数据
             if df is not None and not df.empty:  # 如果有数据
@@ -343,7 +367,7 @@ def _build_daily_data(cumulative):
             vals = ([avg(d10-d5,10)]*10 + [avg(d5-d3,5)]*5 + [avg(d3-inst,2)]*2
                   + [avg(inst,2)]*2 + [round(inst,2)])
         sectors.append({"name": name, "values": vals})  # 添加该行业20天数据
-        time.sleep(0.3)                 # 每次请求间隔0.3秒，避免被限频
+        time.sleep(2)                   # 每个行业请求间隔2秒，防止限频
     return {"date": datetime.now().strftime("%Y-%m-%d"), "time_points": date_strs, "sectors": sectors}
 
 def _print_daily_data(data):
@@ -382,45 +406,122 @@ def _collection_worker():
     """
     global _collection_idx, _collection_active  # 声明全局变量（需要修改）
     today = datetime.now().strftime("%Y-%m-%d")  # 获取当天日期
+    now = datetime.now()                  # 当前时间
+    t_min = now.hour * 60 + now.minute    # 当前时间转总分钟
+    is_weekday = now.weekday() < 5        # 是否工作日
+    after_close = is_weekday and t_min > 15*60  # 是否已收盘（15:00之后）
+
+    # --- 收盘后启动：直接获取当天最终数据填入最后一个点，然后结束 ---
+    if after_close:
+        print(f"🕒 当前 {now.strftime('%H:%M')} 已收盘，直接获取当天最终净流入数据...")
+        snapshot = _fetch_snapshot()    # 获取一次快照
+        if snapshot:
+            sorted_items = sorted(snapshot.items(), key=lambda x: x[1], reverse=True)
+            all_names = [name for name, _ in sorted_items[:TOP_N]]
+            time_points = list(INTRADAY_POINTS)
+            # 所有240个点都填入当天最终数据（表示全天累计净流入）
+            name_values = {}
+            for name in all_names:
+                name_values[name] = [snapshot.get(name, 0)] * 240
+            sectors = [{"name": n, "values": name_values[n]} for n in all_names]
+            save_intraday(today, time_points, sectors)
+            _collection_idx = 240       # 标记为已完成
+            top5 = sorted_items[:5]
+            top5_str = ", ".join(f"{n}({v:+.1f})" for n, v in top5)
+            print(f"✅ 收盘数据已保存 [240/240] TOP5: {top5_str}")
+        else:
+            print(f"❌ 收盘数据获取失败")
+        _collection_active = False
+        return                          # 直接结束
+
+    # --- 非交易时间提示 ---
+    in_trading = is_weekday and ((9*60+31 <= t_min <= 11*60+30) or (13*60+1 <= t_min <= 15*60))
+    if not in_trading:
+        print(f"⚠️️  当前 {now.strftime('%H:%M')} 非交易时间，将每分钟采集一次（数据可能相同）")
     # --- 断点续采：检查是否有当天已有的数据 ---
     existing = load_intraday()          # 从数据库加载当天分时数据
     if existing and existing["date"] == today:  # 如果有当天的数据
         # 恢复进度：从后往前找最后一个有数据的点
         tp = existing["time_points"]    # 240个时间点列表
         sectors_data = existing["sectors"]  # 行业数据列表
+        last_filled = -1                # 最后一个有数据的索引
         for i in range(len(tp) - 1, -1, -1):  # 从最后一个点往前遍历
             has_data = any(s["values"][i] != 0 for s in sectors_data)  # 检查该点是否有数据
             if has_data:                # 找到最后一个有数据的点
-                _collection_idx = i + 1  # 从下一个点开始继续
+                last_filled = i
                 break
-        print(f"📂 恢复分时进度: 已完成 {_collection_idx}/240 点")
+        # 下一采集索引：取“数据库最后填充点+1”和“当前时间对应索引”的较大值
+        current_hm = f"{now.hour:02d}:{now.minute:02d}"
+        time_idx = 0
+        for i, tp_str in enumerate(INTRADAY_POINTS):
+            if tp_str >= current_hm:
+                time_idx = i
+                break
+        else:
+            time_idx = 240
+        _collection_idx = max(last_filled + 1, time_idx)  # 取较大值，确保不后退
+        last_time = tp[last_filled] if last_filled >= 0 else "无"
+        print(f"📂 恢复分时进度: 数据库最后填充={last_filled+1}/240(时间{last_time}), 当前时间={current_hm}(索引{time_idx}), 下一采集={_collection_idx+1}/240")
     else:
-        _collection_idx = 0             # 无历史数据，从头开始
+        # 首次启动：找到当前时间对应的索引，之前的点留0
+        current_hm = f"{now.hour:02d}:{now.minute:02d}"  # 当前北京时间
+        _collection_idx = 0             # 默认从0开始
+        for i, tp in enumerate(INTRADAY_POINTS):
+            if tp >= current_hm:        # 找到第一个 >= 当前时间的点
+                _collection_idx = i
+                break
+        else:
+            _collection_idx = 240       # 所有点都已过去
+        if _collection_idx > 0:
+            print(f"⏩ 跳过已过去的 {_collection_idx} 个点 (09:31~{INTRADAY_POINTS[_collection_idx-1]})，从 {INTRADAY_POINTS[_collection_idx]} 开始采集")
 
     # --- 初始化数据容器 ---
-    time_points = list(INTRADAY_POINTS)  # 复制240个时间点到本地变量
+    time_points = list(INTRADAY_POINTS)  # 固定240个时间标签
     all_names = []                      # 行业名列表（首次采集时确定）
     name_values = {}                    # {行业名: [240个数值]} 存放所有行业的所有数据
+    # 恢复已有数据：从数据库加载到内存，避免被覆盖为0
+    if existing and existing["date"] == today and existing["sectors"]:
+        for s in existing["sectors"]:   # 遍历数据库中的每个行业
+            all_names.append(s["name"])  # 恢复行业名
+            name_values[s["name"]] = list(s["values"])  # 恢复240个数值（保留已有数据）
 
-    # --- 主采集循环 ---
-    while _collection_idx < 240 and not _collection_stop.is_set():  # 未采集完且未收到停止信号
-        target_time = time_points[_collection_idx]  # 当前要采集的目标时间点（如"09:31"）
-        # --- 等待北京时间到达目标分钟 ---
-        while not _collection_stop.is_set():  # 循环等待直到时间到达
-            now = datetime.now()        # 获取当前北京时间
-            current_time = f"{now.hour:02d}:{now.minute:02d}"  # 当前时间的 "HH:MM" 格式
-            if current_time == target_time and now.second >= 1:  # 到达目标分钟且过了第1秒
-                break                   # 时间到了，退出等待
-            # 如果已过目标时间（迟到场景），立即采集不等待
-            h1, m1 = map(int, target_time.split(":"))  # 解析目标时间为小时和分钟
-            target_minutes = h1 * 60 + m1   # 目标时间转为总分钟数
-            current_minutes = now.hour * 60 + now.minute  # 当前时间转为总分钟数
-            if current_minutes > target_minutes:  # 当前已过目标时间
-                break                   # 立即采集
-            _collection_stop.wait(timeout=0.5)  # 等待0.5秒后再检查（减少CPU占用）
+    # --- 主采集循环：根据实际时间动态定位索引，每分钟采集一次 ---
+    _collection_total = 240             # 固定240个点
+    while _collection_idx < _collection_total and not _collection_stop.is_set():  # 未采集完且未收到停止信号
+        # --- 等待下一分钟到来（始终等待真实时间，不跳过） ---
+        prev_minute = datetime.now().minute  # 记录当前分钟
+        while not _collection_stop.is_set():
+            now = datetime.now()
+            if now.minute != prev_minute and now.second >= 1:  # 新的一分钟到了
+                break
+            _collection_stop.wait(timeout=0.3)  # 0.3秒检查一次
 
         if _collection_stop.is_set():   # 收到停止信号
             break                       # 退出主循环
+
+        # --- 根据实际时间动态定位索引（核心：标签必须匹配实际时间） ---
+        now = datetime.now()
+        actual_hm = f"{now.hour:02d}:{now.minute:02d}"  # 真实北京时间
+        # 在INTRADAY_POINTS中找到实际时间对应的索引
+        actual_idx = -1
+        for i, tp in enumerate(INTRADAY_POINTS):
+            if tp == actual_hm:
+                actual_idx = i
+                break
+        # 找不到对应索引（午休11:31~12:59或其他非交易时间）→ 跳过本次，不采集
+        if actual_idx < 0:
+            print(f"⏸️  实际:{actual_hm} 非采集时间(午休/非交易)，跳过")
+            continue  # 跳过本次循环，等待下一分钟
+        if actual_idx > _collection_idx:
+            _collection_idx = actual_idx  # 跳到实际时间对应的索引
+        elif actual_idx < _collection_idx:
+            pass  # 实际时间已超过当前索引，继续用当前索引（不后退）
+
+        label_time = time_points[_collection_idx]  # 标签时间点（应等于实际时间）
+        actual_time = now.strftime("%H:%M")        # 真实北京时间
+        t_min = now.hour * 60 + now.minute
+        is_trading = (now.weekday() < 5 and ((9*60+31 <= t_min <= 11*60+30) or (13*60+1 <= t_min <= 15*60)))
+        trading_tag = "交易时间" if is_trading else "非交易时间"
 
         # --- 执行采集 ---
         snapshot = _fetch_snapshot()    # 调用API获取全行业即时快照
@@ -436,11 +537,16 @@ def _collection_worker():
             for name in all_names:      # 遍历所有行业
                 name_values[name][_collection_idx] = snapshot.get(name, 0)  # 填入该行业当前值
 
-            print(f"📸 [{_collection_idx+1}/240] {target_time} 采集成功")  # 打印进度
+            # 打印详细信息：序号、标签时间、真实时间、交易状态、TOP5数据
+            top5 = sorted(snapshot.items(), key=lambda x: x[1], reverse=True)[:5]
+            top5_str = ", ".join(f"{n}({v:+.1f})" for n, v in top5)
+            print(f"📸 [{_collection_idx+1}/{_collection_total}] 标签:{label_time} 实际:{actual_time} [{trading_tag}] TOP5: {top5_str}")
 
             # 每次采集后立即保存到数据库（防止程序崩溃丢失数据）
             sectors = [{"name": n, "values": name_values[n]} for n in all_names]  # 构建行业数据
             save_intraday(today, time_points, sectors)  # 保存到分时数据库
+        else:
+            print(f"⚠️️  [{_collection_idx+1}/{_collection_total}] 标签:{label_time} 实际:{actual_time} [{trading_tag}] API返回空")
 
         _collection_idx += 1            # 进度+1，准备采集下一个点
 
