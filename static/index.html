@@ -51,7 +51,7 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   <!-- 按钮2：刷新分时数据（蓝色） -->
   <button id="btnRefreshIntraday" class="btn-blue" onclick="doRefreshIntraday()">🔄 刷新分时数据</button>
   <!-- 按钮3：将分时数据合并到每日（绿色） -->
-  <button id="btnMerge" class="btn-green" onclick="doMergeIntraday()">🔀 将分时数据合并到每日</button>
+  <button id="btnMerge" class="btn-green" onclick="doMergeIntraday()">🔀 将分时数据更新到每日</button>
   <div class="sep"></div>               <!-- 竖线分隔 -->
   <!-- 状态显示文字 -->
   <span class="st" id="stDaily">每日: 加载中…</span>     <!-- 每日数据状态 -->
@@ -133,7 +133,20 @@ function makeOption(res, yName) {
     backgroundColor: '#0d1117',         // 深色背景（与页面一致）
     // 鼠标悬浮提示框
     tooltip: {trigger:'axis', backgroundColor:'#1c2333', borderColor:'#30363d',
-              textStyle:{color:'#c9d1d9',fontSize:11}},
+              textStyle:{color:'#c9d1d9',fontSize:11},
+              enterable:true,
+              confine:true,
+              formatter: function(params) {
+                if (!params || params.length === 0) return '';
+                var title = '<b style="color:#58a6ff">' + params[0].axisValue + '</b><br>';
+                var items = params.map(function(p) {
+                  var val = Array.isArray(p.value) ? p.value[1] : p.value;
+                  var sign = val > 0 ? '+' : '';
+                  return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + p.color + ';margin-right:4px;vertical-align:middle"></span>' +
+                    p.seriesName + ': ' + sign + Number(val).toFixed(2) + '<br>';
+                }).join('');
+                return '<div style="max-height:180px;overflow-y:auto;">' + title + items + '</div>';
+              }},
     // 图例（右上角可滚动，显示行业名）
     legend: {data: res.sectors.map(s=>s.name), textStyle:{color:'#8b949e',fontSize:10},
              top:28, right:16, type:'scroll', icon:'circle', itemWidth:8, itemHeight:8, itemGap:10},
