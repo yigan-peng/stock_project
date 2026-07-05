@@ -26,7 +26,7 @@ STATIC_DIR = "static"                   # 前端静态文件目录（存放index
 MIN_REFRESH_INTERVAL = 180              # 每日数据刷新最小间隔（秒），防止频繁请求被封IP
 MAX_DAILY_REQUESTS = 50                 # 每日数据每日最大请求次数，超过则拒绝
 DAILY_COUNT_FILE = "daily_count.json"   # 记录每日请求次数的本地JSON文件
-TOP_N = 20                              # 展示的行业数量（取净流入排名前20的行业）
+TOP_N = 90                              # 展示的行业数量（取净流入排名前20的行业）
 
 LAST_REFRESH_TIME = 0                   # 上次刷新每日数据的时间戳（用于冷却计算）
 _refresh_lock: asyncio.Lock | None = None  # 异步锁，防止多个刷新请求并发执行
@@ -417,6 +417,7 @@ def _collection_worker():
     - 采集完240个点后自动结束
     - 支持断点续采（重启后从上次位置继续）
     """
+    print("🔥 测试点：非交易时间之后的第一行代码")
     global _collection_idx, _collection_active  # 声明全局变量（需要修改）
     today = datetime.now().strftime("%Y-%m-%d")  # 获取当天日期
     now = datetime.now()                  # 当前时间
@@ -444,8 +445,8 @@ def _collection_worker():
             print(f"✅ 收盘数据已保存 [241/241] TOP5: {top5_str}")
         else:
             print(f"❌ 收盘数据获取失败")
-        _collection_active = False
-        return                          # 直接结束
+        # _collection_active = False
+        # return                          # 直接结束
 
     # --- 非交易时间提示 ---
     in_trading = is_weekday and ((9*60+31 <= t_min <= 11*60+30) or (13*60 <= t_min <= 15*60))
@@ -499,10 +500,11 @@ def _collection_worker():
             name_values[s["name"]] = list(s["values"])  # 恢复240个数值（保留已有数据）
 
     # --- 主采集循环：根据实际时间动态定位索引，每分钟采集一次 ---
-    _collection_total = 241             # 固定241个点
+    _collection_total = 243             # 固定241个点
     while _collection_idx < _collection_total and not _collection_stop.is_set():  # 未采集完且未收到停止信号
         try:
             # --- 等待下一分钟到来（始终等待真实时间，不跳过） ---
+            print("⏳ 进入等待下一分钟...")
             prev_minute = datetime.now().minute  # 记录当前分钟
             while not _collection_stop.is_set():
                 now = datetime.now()
@@ -590,7 +592,7 @@ def _collection_worker():
             _time.sleep(5)  # 异常后等待5秒再继续
 
     # --- 采集结束 ---
-    _collection_active = False          # 标记采集不再活跃
+    # _collection_active = False          # 标记采集不再活跃
     if _collection_idx >= 241:          # 如果完成了全部241个点
         print("✅ 分时采集完成! 241/241 点")
     else:                               # 被手动停止
@@ -818,10 +820,10 @@ async def intraday_refresh():
         # 无当天数据：首次创建
         sorted_items = sorted(snapshot.items(), key=lambda x: x[1], reverse=True)
         all_names = [name for name, _ in sorted_items[:TOP_N]]
-        time_points = [current_hm]       # 只有一个时间点
+        time_points = list(INTRADAY_POINTS)       # 只有一个时间点
         sectors = []
         for name in all_names:
-            sectors.append({"name": name, "values": [snapshot.get(name, 0)]})
+            sectors.append({"name": name, "values": [0.0] * 241})
         save_intraday(today, time_points, sectors)
         return {"date": today, "time_points": time_points, "sectors": sectors}
 
