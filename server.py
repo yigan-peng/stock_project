@@ -384,19 +384,14 @@ def _build_daily_data(cumulative):
     return {"date": datetime.now().strftime("%Y-%m-%d"), "time_points": date_strs, "sectors": sectors}
 
 def _print_daily_data(data):
-    """在控制台整齐打印每日数据表格，方便调试查看"""
-    print("\n" + "=" * 120)             # 打印顶部分隔线
-    print(f"📊 每日净流入 ({data['date']})  {data['time_points'][0]} ~ {data['time_points'][-1]}")  # 标题行
-    print("=" * 120)                    # 分隔线
-    header = f"{'行业':<10}"            # 表头第一列：行业名
-    for d in data['time_points']: header += f" {d:>8}"  # 表头后续列：日期
-    print(header); print("-" * 120)     # 打印表头和分隔线
-    for s in data['sectors']:           # 遍历每个行业
-        line = f"{s['name']:<10}"       # 行业名
-        for v in s['values']:           # 遍历每一天的值
-            line += f" {'+' + str(round(v,1)):>8}" if v > 0 else f" {str(round(v,1)):>8}"  # 正值加+号
-        print(line)                     # 打印该行
-    print("=" * 120 + "\n")             # 打印底部分隔线
+    """在控制台打印每日数据摘要"""
+    print(f"\n📊 每日净流入 ({data['date']})")
+    print(f"   时间点: {data['time_points'][0]} ~ {data['time_points'][-1]}, 共{len(data['time_points'])}个点")
+    print(f"   行业数: {len(data['sectors'])}")
+    for s in data['sectors'][:3]:
+        vals = s['values']
+        print(f"   {s['name']}: 首={vals[0]:+.2f}, 末={vals[-1]:+.2f}")
+    print()
 
 def do_daily_refresh():
     """执行每日数据刷新：获取→构建→保存→打印"""
@@ -430,15 +425,15 @@ def _collection_worker():
         print(f"🕒 当前 {now.strftime('%H:%M')} 已收盘，直接获取当天最终净流入数据...")
         snapshot = _fetch_snapshot()    # 获取一次快照
         if snapshot:
-            sorted_items = sorted(snapshot.items(), key=lambda x: x[1], reverse=True)
+            sorted_items = sorted(snapshot.items(), key=lambda x: x[1], reverse=True) #按净流入金额从大到小排序
             all_names = [name for name, _ in sorted_items[:TOP_N]]
             time_points = list(INTRADAY_POINTS)
             # 所有240个点都填入当天最终数据（表示全天累计净流入）
             name_values = {}
             for name in all_names:
-                name_values[name] = [snapshot.get(name, 0)] * 241
+                name_values[name][240] = snapshot.get(name, 0)
             sectors = [{"name": n, "values": name_values[n]} for n in all_names]
-            save_intraday(today, time_points, sectors)
+            # save_intraday(today, time_points, sectors)
             _collection_idx = 241       # 标记为已完成
             top5 = sorted_items[:5]
             top5_str = ", ".join(f"{n}({v:+.1f})" for n, v in top5)
@@ -500,7 +495,8 @@ def _collection_worker():
             name_values[s["name"]] = list(s["values"])  # 恢复240个数值（保留已有数据）
 
     # --- 主采集循环：根据实际时间动态定位索引，每分钟采集一次 ---
-    _collection_total = 243             # 固定241个点
+    _collection_total = 241             # 固定241个点
+    _collection_idx = 0
     while _collection_idx < _collection_total and not _collection_stop.is_set():  # 未采集完且未收到停止信号
         try:
             # --- 等待下一分钟到来（始终等待真实时间，不跳过） ---
@@ -524,6 +520,7 @@ def _collection_worker():
                 if tp == actual_hm:
                     actual_idx = i
                     break
+            print("actual_idx:{actual_idx}")
             # 找不到对应索引（午休11:31~12:59或其他非交易时间）→ 跳过本次，不采集
             if actual_idx < 0:
                 # 计算下一个采集时间
@@ -540,6 +537,7 @@ def _collection_worker():
                     next_time = "明天09:31"  # 已收盘
                 print(f"⏸️️  当前:{actual_hm} 非采集时间，跳过 | 下次采集:{next_time} | 已采集:{_collection_idx}/{_collection_total}")
                 continue  # 跳过本次循环，等待下一分钟
+
             if actual_idx > _collection_idx:
                 _collection_idx = actual_idx  # 跳到实际时间对应的索引
             elif actual_idx < _collection_idx:
@@ -643,41 +641,133 @@ def _get_latest_intraday_values():
 
 def do_merge_intraday_to_daily():
     """
-    将分时最终数据滑入每日数据（链表式更新）：
-    - 新数据进队尾（最新一天）
-    - 旧数据出队头（最远一天被丢弃）
-    - 保持20天的滑动窗口
+    将分时数据（241个点）合并到每日数据库：
+    - 每天存储完整的241个时间点数据
+    - 最大存储30天
+    - 超过30天自动删除最早的一天
     返回: (更新后的数据, 错误信息) 成功时错误信息为None
     """
-    values = _get_latest_intraday_values()  # 提取分时数据的最新值
-    if not values:                      # 无分时数据
-        return None, "无分时数据可合并"  # 返回错误
-    daily = load_daily()                # 加载当前每日数据
-    if not daily:                       # 无每日数据
-        return None, "无每日数据基础，请先点击「更新数据(每日)」"  # 需要先初始化
+    # 加载当天分时数据（241个点）
+    intraday = load_intraday()
+    if not intraday or not intraday.get("sectors"):
+        return None, "无分时数据可合并"
 
-    today = datetime.now().strftime("%Y-%m-%d")      # 完整日期 "YYYY-MM-DD"
-    today_short = datetime.now().strftime("%m-%d")   # 短日期 "MM-DD"（用于X轴显示）
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    # --- 情况1：今天已在每日数据中 → 直接替换 ---
-    if today_short in daily["time_points"]:  # 检查今天是否已在时间列表中
-        idx = daily["time_points"].index(today_short)  # 找到今天的索引位置
-        for s in daily["sectors"]:      # 遍历每个行业
-            if s["name"] in values:     # 如果该行业在分时数据中
-                s["values"][idx] = values[s["name"]]  # 替换为最新值
-    # --- 情况2：今天不在每日数据中 → 滑窗更新 ---
-    else:
-        daily["time_points"].pop(0)     # 丢弃最远的一天（队头出队）
-        daily["time_points"].append(today_short)  # 新日期加入队尾
-        for s in daily["sectors"]:      # 遍历每个行业
-            s["values"].pop(0)          # 丢弃最远一天的值
-            s["values"].append(values.get(s["name"], 0))  # 新值加入队尾（无该行业则填0）
+    # 从数据库加载所有记录
+    conn = get_db(DB_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
+    ).fetchall()
+    
+    # 转为列表
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "sectors": json.loads(row["sectors"])
+        })
 
-    daily["date"] = today               # 更新日期戳
-    save_daily(today, daily["time_points"], daily["sectors"])  # 保存到数据库
-    _print_daily_data(daily)            # 控制台打印更新后的表格
-    print(f"✅ 分时数据已合并到每日: {len(daily['sectors'])} 行业 × {len(daily['time_points'])} 天")
-    return daily, None                  # 返回成功
+    # 检查今天是否已有记录
+    found = False
+    for rec in records:
+        if rec["date"] == today:
+            # 更新今天的记录
+            rec["time_points"] = intraday["time_points"]
+            rec["sectors"] = intraday["sectors"]
+            found = True
+            break
+
+    if not found:
+        # 添加今天的记录
+        records.append({
+            "date": today,
+            "time_points": intraday["time_points"],
+            "sectors": intraday["sectors"]
+        })
+
+    # 超过30天则删除最早的
+    MAX_DAYS = 30
+    while len(records) > MAX_DAYS:
+        removed = records.pop(0)
+        print(f"🗑️ 删除过期数据: {removed['date']}")
+
+    # 全部重新写入数据库
+    conn.execute("DELETE FROM fund_flow")
+    for rec in records:
+        conn.execute(
+            "INSERT INTO fund_flow (date, time_points, sectors) VALUES (?, ?, ?)",
+            (rec["date"],
+             json.dumps(rec["time_points"], ensure_ascii=False),
+             json.dumps(rec["sectors"], ensure_ascii=False))
+        )
+    conn.commit()
+    conn.close()
+
+    # ===== 从每日数据库中读取30天数据并构造前端显示数据 =====
+    # 重新读取数据库（确保是最新数据）
+    conn = get_db(DB_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
+    ).fetchall()
+    conn.close()
+    
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "sectors": json.loads(row["sectors"])
+        })
+    
+    # ===== 构造前端显示数据：30个自然日，横坐标日期，纵坐标每天15:00的值 =====
+    today_date = datetime.now().date()
+    # 生成近30个自然日的日期列表（从今天往前推29天）
+    dates = []
+    for i in range(29, -1, -1):  # 29, 28, ..., 0
+        d = today_date - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+    
+    # 将数据库记录按日期建立索引，方便查找
+    record_by_date = {}
+    for rec in records:
+        record_by_date[rec["date"]] = rec
+    
+    # 取最近一天有数据的行业列表作为基准
+    base_sectors = []
+    for rec in reversed(records):
+        if rec["sectors"]:
+            base_sectors = rec["sectors"]
+            break
+    
+    sectors_list = []
+    if base_sectors:
+        for sector_template in base_sectors:
+            name = sector_template["name"]
+            values = []
+            for date_str in dates:
+                if date_str in record_by_date:
+                    rec = record_by_date[date_str]
+                    sector_value = 0
+                    for s in rec["sectors"]:
+                        if s["name"] == name:
+                            sector_value = s["values"][240] if len(s["values"]) > 240 else 0
+                            break
+                    values.append(sector_value)
+                else:
+                    values.append(0)  # 没有数据的日期填0
+            sectors_list.append({"name": name, "values": values})
+    
+    result = {
+        "date": dates[-1],  # 最后一天是今天
+        "time_points": dates,  # 横坐标：30个自然日
+        "sectors": sectors_list  # 每个行业30个值
+    }
+
+    # 返回今天的记录
+    print(f"✅ 分时数据已合并到每日: {len(intraday['sectors'])} 行业 × 241个时间点 | 共{len(records)}天数据")
+    return result, None
 
 # ==================== FastAPI Web服务 ====================
 async def _check_collection_alive():
@@ -732,8 +822,66 @@ async def index():
 # --- 每日数据API ---
 @app.get("/api/daily/history")          # GET请求：获取每日历史数据
 async def daily_history():
-    d = load_daily()                    # 从数据库加载
-    return d if d else {"error": "暂无每日数据，请点击「更新数据(每日)」"}  # 有数据返回，否则返回错误提示
+    d = load_daily()
+    if not d:
+        return {"error": "暂无每日数据，请点击「更新数据(每日)」"}
+    
+    conn = get_db(DB_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
+    ).fetchall()
+    conn.close()
+    
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "sectors": json.loads(row["sectors"])
+        })
+    
+    # 生成近30个自然日的日期列表
+    today_date = datetime.now().date()
+    dates = []
+    for i in range(29, -1, -1):
+        d = today_date - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+    
+    # 按日期建立索引
+    record_by_date = {}
+    for rec in records:
+        record_by_date[rec["date"]] = rec
+    
+    # 取最近一天有数据的行业列表
+    base_sectors = []
+    for rec in reversed(records):
+        if rec["sectors"]:
+            base_sectors = rec["sectors"]
+            break
+    
+    sectors_list = []
+    if base_sectors:
+        for sector_template in base_sectors:
+            name = sector_template["name"]
+            values = []
+            for date_str in dates:
+                if date_str in record_by_date:
+                    rec = record_by_date[date_str]
+                    sector_value = 0
+                    for s in rec["sectors"]:
+                        if s["name"] == name:
+                            sector_value = s["values"][240] if len(s["values"]) > 240 else 0
+                            break
+                    values.append(sector_value)
+                else:
+                    values.append(0)
+            sectors_list.append({"name": name, "values": values})
+    
+    return {
+        "date": dates[-1],
+        "time_points": dates,  # 横坐标：30个自然日
+        "sectors": sectors_list  # 每个行业30个值
+    }
 
 @app.post("/api/daily/refresh")         # POST请求：刷新每日数据
 async def daily_refresh():
@@ -750,9 +898,62 @@ async def daily_refresh():
         try:
             result = do_daily_refresh()  # 执行刷新逻辑
             LAST_REFRESH_TIME = time.time()  # 更新上次刷新时间
-            return result               # 返回数据
+           # 构造30个自然日的数据
+            conn = get_db(DB_DAILY)
+            rows = conn.execute(
+                "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
+            ).fetchall()
+            conn.close()
+            
+            records = []
+            for row in rows:
+                records.append({
+                    "date": row["date"],
+                    "time_points": json.loads(row["time_points"]),
+                    "sectors": json.loads(row["sectors"])
+                })
+            
+            today_date = datetime.now().date()
+            dates = []
+            for i in range(29, -1, -1):
+                d = today_date - timedelta(days=i)
+                dates.append(d.strftime("%Y-%m-%d"))
+            
+            record_by_date = {}
+            for rec in records:
+                record_by_date[rec["date"]] = rec
+            
+            base_sectors = []
+            for rec in reversed(records):
+                if rec["sectors"]:
+                    base_sectors = rec["sectors"]
+                    break
+            
+            sectors_list = []
+            if base_sectors:
+                for sector_template in base_sectors:
+                    name = sector_template["name"]
+                    values = []
+                    for date_str in dates:
+                        if date_str in record_by_date:
+                            rec = record_by_date[date_str]
+                            sector_value = 0
+                            for s in rec["sectors"]:
+                                if s["name"] == name:
+                                    sector_value = s["values"][240] if len(s["values"]) > 240 else 0
+                                    break
+                            values.append(sector_value)
+                        else:
+                            values.append(0)
+                    sectors_list.append({"name": name, "values": values})
+            
+            return {
+                "date": dates[-1],
+                "time_points": dates,
+                "sectors": sectors_list
+            }
         except Exception as e:
-            return JSONResponse(status_code=500, content={"error": str(e)})  # 服务器错误
+            return JSONResponse(status_code=500, content={"error": str(e)})
 
 # --- 分时数据API ---
 @app.get("/api/intraday/history")       # GET请求：获取当天分时数据
@@ -831,13 +1032,15 @@ async def intraday_refresh():
 @app.post("/api/daily/merge_intraday")  # POST请求：将分时数据合并到每日
 async def merge_intraday():
     try:
-        result, err = do_merge_intraday_to_daily()  # 执行合并逻辑
-        if err:                         # 如果有错误
-            return JSONResponse(status_code=400, content={"error": err})  # 返回400错误
-        return result                   # 返回合并后的数据
+        result, err = do_merge_intraday_to_daily()
+        if err:
+            return JSONResponse(status_code=400, content={"error": err})
+        
+        # result 已经包含了30个自然日的数据，直接返回
+        return result
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})  # 服务器错误
-
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    
 # ==================== 程序入口 ====================
 if __name__ == "__main__":              # 直接运行此文件时执行
     print("🚀 启动服务器...")            # 控制台提示
