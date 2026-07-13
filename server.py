@@ -428,20 +428,39 @@ def _collection_worker():
             sorted_items = sorted(snapshot.items(), key=lambda x: x[1], reverse=True) #按净流入金额从大到小排序
             all_names = [name for name, _ in sorted_items[:TOP_N]]
             time_points = list(INTRADAY_POINTS)
-            # 所有240个点都填入当天最终数据（表示全天累计净流入）
-            name_values = {}
-            for name in all_names:
-                name_values[name][240] = snapshot.get(name, 0)
-            sectors = [{"name": n, "values": name_values[n]} for n in all_names]
-            # save_intraday(today, time_points, sectors)
+            
+            # 直接操作数据库，只更新最后一个点，不碰其他点
+            conn = get_db(DB_INTRADAY)  # 连接分时数据库
+            existing = conn.execute(    # 查询当天是否已有数据
+                "SELECT sectors FROM intraday_data WHERE date = ?", (today,)
+            ).fetchone()
+            
+            if existing:  # 如果已经有当天数据
+                old_sectors = json.loads(existing["sectors"])  # 把数据库里的JSON解析成Python列表
+                old_dict = {s["name"]: s["values"] for s in old_sectors}  # 转成字典方便按行业名查找
+                
+                for name in all_names:  # 遍历要更新的行业
+                    if name in old_dict:  # 如果这个行业在旧数据中已存在
+                        old_dict[name][-1] = snapshot.get(name, 0)  # 只改最后一个点的值，其他点不动
+                
+                sectors = [{"name": n, "values": old_dict[n]} for n in old_dict]  # 字典转回列表格式
+                
+                conn.execute("DELETE FROM intraday_data WHERE date = ?", (today,))  # 删除当天旧记录
+                conn.execute("INSERT INTO intraday_data (date, time_points, sectors) VALUES (?, ?, ?)",  # 写入新记录
+                    (today,
+                    json.dumps(time_points, ensure_ascii=False),  # 时间点转JSON
+                    json.dumps(sectors, ensure_ascii=False)))     # 行业数据转JSON
+                conn.commit()  # 提交事务
+            conn.close()  # 关闭数据库连接
+
             _collection_idx = 241       # 标记为已完成
             top5 = sorted_items[:5]
             top5_str = ", ".join(f"{n}({v:+.1f})" for n, v in top5)
             print(f"✅ 收盘数据已保存 [241/241] TOP5: {top5_str}")
         else:
             print(f"❌ 收盘数据获取失败")
-        # _collection_active = False
-        # return                          # 直接结束
+        _collection_active = False
+        return                          # 直接结束
 
     # --- 非交易时间提示 ---
     in_trading = is_weekday and ((9*60+31 <= t_min <= 11*60+30) or (13*60 <= t_min <= 15*60))
