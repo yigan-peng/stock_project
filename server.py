@@ -1063,7 +1063,7 @@ async def merge_intraday():
 # ==================== 程序入口 ====================
 if __name__ == "__main__":              # 直接运行此文件时执行
     print("🚀 启动服务器...")            # 控制台提示
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
     # 启动uvicorn服务器：
     #   app: FastAPI应用实例
     #   host="0.0.0.0": 监听所有网络接口（允许局域网访问）
