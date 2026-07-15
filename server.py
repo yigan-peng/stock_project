@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse      # 文件响应，用于返回HTM
 from starlette.responses import JSONResponse    # JSON响应，用于返回错误状态码
 from fastapi.staticfiles import StaticFiles     # 静态文件服务，用于托管前端HTML/JS文件
 from akshare.stock_feature.stock_fund_flow import _get_file_content_ths  # 获取同花顺JS验证码文件内容
+from fastapi import Request
 import uvicorn                          # ASGI服务器，用于运行FastAPI应用
 
 # ==================== 全局配置 ====================
@@ -1060,6 +1061,76 @@ async def merge_intraday():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     
+
+@app.get("/api/daily/delete_point")
+async def daily_delete_point(date: str = ""):
+    if not date:
+        return JSONResponse(status_code=400, content={"error": "缺少日期参数"})
+
+    conn = get_db(DB_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
+    ).fetchall()
+    
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "sectors": json.loads(row["sectors"])
+        })
+
+    # 尝试删除匹配的日期
+    new_records = [rec for rec in records if date not in rec["date"]]
+
+    if len(new_records) < len(records):
+        # 找到了要删除的数据，写入数据库
+        conn.execute("DELETE FROM fund_flow")
+        for rec in new_records:
+            conn.execute(
+                "INSERT INTO fund_flow (date, time_points, sectors) VALUES (?, ?, ?)",
+                (rec["date"],
+                 json.dumps(rec["time_points"], ensure_ascii=False),
+                 json.dumps(rec["sectors"], ensure_ascii=False))
+            )
+        conn.commit()
+    conn.close()
+
+    # 统一构造30天数据返回
+    today_date = datetime.now().date()
+    dates = []
+    for i in range(29, -1, -1):
+        d = today_date - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+
+    record_by_date = {rec["date"]: rec for rec in new_records}
+
+    base_sectors = []
+    for rec in reversed(new_records):
+        if rec["sectors"]:
+            base_sectors = rec["sectors"]
+            break
+
+    sectors_list = []
+    if base_sectors:
+        for sector_template in base_sectors:
+            name = sector_template["name"]
+            values = []
+            for date_str in dates:
+                if date_str in record_by_date:
+                    rec = record_by_date[date_str]
+                    sector_value = 0
+                    for s in rec["sectors"]:
+                        if s["name"] == name:
+                            sector_value = s["values"][240] if len(s["values"]) > 240 else 0
+                            break
+                    values.append(sector_value)
+                else:
+                    values.append(0)
+            sectors_list.append({"name": name, "values": values})
+
+    return {"date": dates[-1], "time_points": dates, "sectors": sectors_list}
+
 # ==================== 程序入口 ====================
 if __name__ == "__main__":              # 直接运行此文件时执行
     print("🚀 启动服务器...")            # 控制台提示
