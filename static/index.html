@@ -45,9 +45,6 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 <!-- ===== 顶部工具栏区域 ===== -->
 <div class="hdr">
   <span>📊 行业资金流向</span>          <!-- 页面标题文字 -->
-  <!-- 按钮1：刷新每日数据（绿色） -->
-  <button id="btnDaily" class="btn-green" onclick="doDailyRefresh()">🔄 更新数据(每日)</button>
-  <div class="sep"></div>               <!-- 竖线分隔 -->
   <!-- 按钮2：刷新分时数据（蓝色） -->
   <button id="btnRefreshIntraday" class="btn-blue" onclick="doRefreshIntraday()">🔄 刷新分时数据</button>
   <!-- 按钮3：将分时数据合并到每日（绿色） -->
@@ -82,7 +79,6 @@ const chartIntraday = echarts.init(document.getElementById('chartIntraday')); //
 // ==================== 获取DOM元素引用 ====================
 const stDaily = document.getElementById('stDaily');       // 每日状态文字元素
 const stIntraday = document.getElementById('stIntraday'); // 分时状态文字元素
-const btnDaily = document.getElementById('btnDaily');     // 每日刷新按钮
 const btnRefreshIntraday = document.getElementById('btnRefreshIntraday'); // 分时刷新按钮
 
 // ==================== 20种颜色（循环使用给20个行业） ====================
@@ -141,6 +137,11 @@ function makeOption(res, yName) {
                 var title = '<b style="color:#58a6ff">' + params[0].axisValue + '</b><br>';
                 var items = params.map(function(p) {
                   var val = Array.isArray(p.value) ? p.value[1] : p.value;
+                  // 处理 null 值
+                  if (val === null) {
+                    return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + p.color + ';margin-right:4px;vertical-align:middle"></span>' +
+                      p.seriesName + ': 无数据<br>';
+                  }
                   var sign = val > 0 ? '+' : '';
                   return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + p.color + ';margin-right:4px;vertical-align:middle"></span>' +
                     p.seriesName + ': ' + sign + Number(val).toFixed(2) + '<br>';
@@ -169,7 +170,9 @@ function makeOption(res, yName) {
       symbolSize:4,                     // 数据点大小
       lineStyle:{width:1.5,color:C[i%C.length]},  // 线条样式（颜色循环取）
       itemStyle:{color:C[i%C.length]},  // 数据点颜色
-      data: s.values.map((v,t)=>[res.time_points[t], v??0])  // 数据对：[时间点, 值]
+      // 关键修改：遇到 null 值时断开连线
+      connectNulls: false,  // 不连接 null 值，形成断点
+      data: s.values.map((v,t)=>[res.time_points[t], v])  // null 值保持原样传入
     }))
   };
 }
@@ -231,24 +234,6 @@ function renderIntraday(res, animate) {
     chartIntraday.setOption(opt, true);              // 替换模式渲染
     chartIntraday.resize();
   }
-}
-
-// ==================== 按钮操作：刷新每日数据 ====================
-/**
- * 点击"🔄 更新数据(每日)"按钮触发
- * 调用后端API从同花顺获取20天每日数据
- */
-function doDailyRefresh() {
-  btnDaily.disabled = true;                       // 禁用按钮（防止重复点击）
-  stDaily.textContent = '每日: 更新中...';        // 显示加载状态
-  fetch('/api/daily/refresh', {method:'POST'})    // POST请求后端刷新API
-    .then(r=>r.json())                            // 解析JSON响应
-    .then(j=>{
-      if (j.error) { stDaily.textContent = '每日: ' + j.error; return; }  // 错误处理
-      renderDaily(j);                             // 渲染图表
-    })
-    .catch(e=>{stDaily.textContent='每日: 请求失败'})  // 网络错误
-    .finally(()=>btnDaily.disabled=false);        // 恢复按钮
 }
 
 let _intradayAnimating = false;  // 分时动画进行中标志
