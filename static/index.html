@@ -123,11 +123,9 @@ function switchTab(name) {
  * 返回: ECharts option对象 或 null（无数据时）
  */
 function makeOption(res, yName) {
-  // 数据无效时返回null
   if (!res || res.error || !res.sectors || res.sectors.length===0) return null;
   return {
-    backgroundColor: '#0d1117',         // 深色背景（与页面一致）
-    // 鼠标悬浮提示框
+    backgroundColor: '#0d1117',
     tooltip: {trigger:'axis', backgroundColor:'#1c2333', borderColor:'#30363d',
               textStyle:{color:'#c9d1d9',fontSize:11},
               enterable:true,
@@ -137,57 +135,67 @@ function makeOption(res, yName) {
                 var title = '<b style="color:#58a6ff">' + params[0].axisValue + '</b><br>';
                 var items = params.map(function(p) {
                   var val = Array.isArray(p.value) ? p.value[1] : p.value;
-                  // 处理 null 值
-                  if (val === null) {
-                    return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + p.color + ';margin-right:4px;vertical-align:middle"></span>' +
-                      p.seriesName + ': 无数据<br>';
-                  }
                   var sign = val > 0 ? '+' : '';
                   return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + p.color + ';margin-right:4px;vertical-align:middle"></span>' +
                     p.seriesName + ': ' + sign + Number(val).toFixed(2) + '<br>';
                 }).join('');
                 return '<div style="max-height:180px;overflow-y:auto;">' + title + items + '</div>';
               }},
-    // 图例（右上角可滚动，显示行业名）
     legend: {data: res.sectors.map(s=>s.name), textStyle:{color:'#8b949e',fontSize:10},
              top:28, right:16, type:'scroll', icon:'circle', itemWidth:8, itemHeight:8, itemGap:10},
-    // 图表网格区域（留出标题和图例空间，全屏最大化）
     grid: {left:'16px',right:'16px',bottom:'16px',top:68,containLabel:true},
-    // X轴：分类轴，数据为时间点/日期
     xAxis: {type:'category', data:res.time_points,
             axisLine:{lineStyle:{color:'#30363d'}}, axisLabel:{color:'#8b949e',fontSize:10}},
-    // Y轴：数值轴，固定范围-210~+120，0在坐标系内
     yAxis: {type:'value', name:yName, min:Y_MIN, max:Y_MAX,
             nameTextStyle:{color:'#8b949e',fontSize:10},
             axisLine:{lineStyle:{color:'#30363d'}}, axisLabel:{color:'#8b949e',fontSize:10},
-            splitLine:{lineStyle:{color:'#21262d'}}},  // 水平网格线
-    // 数据系列：每个行业一条曲线
+            splitLine:{lineStyle:{color:'#21262d'}}},
     series: res.sectors.map((s,i)=>({
-      name:s.name,                      // 行业名（对应图例）
-      type:'line',                      // 折线图
-      smooth:true,                      // 平滑曲线
-      symbol:'circle',                  // 数据点形状：圆点
-      symbolSize:4,                     // 数据点大小
-      lineStyle:{width:1.5,color:C[i%C.length]},  // 线条样式（颜色循环取）
-      itemStyle:{color:C[i%C.length]},  // 数据点颜色
-      // 关键修改：遇到 null 值时断开连线
-      connectNulls: false,  // 不连接 null 值，形成断点
-      data: s.values.map((v,t)=>[res.time_points[t], v])  // null 值保持原样传入
+      name:s.name,
+      type:'line',
+      smooth:true,
+      symbol:'circle',
+      symbolSize:4,
+      lineStyle:{width:1.5,color:C[i%C.length]},
+      itemStyle:{color:C[i%C.length]},
+      connectNulls: true,
+      data: s.values.map((v,t)=>[res.time_points[t], v])
     }))
   };
 }
 
 // ==================== 渲染每日图表 ====================
-/**
- * 将API返回的每日数据渲染到每日图表
- * res: {date, time_points: ["06-20",...], sectors: [{name, values},...]}
- */
 function renderDaily(res) {
-  if (res.error) { stDaily.textContent = '每日: ' + res.error; return; }  // 错误提示
-  // 更新状态文字：显示日期和数据天数
-  stDaily.textContent = '每日: ' + res.date + ' (' + res.time_points.length + '天)';
-  const opt = makeOption(res, '净流入(亿元)');  // 生成图表配置
-  if (opt) chartDaily.setOption(opt, true);       // 替换模式渲染到图表（完全重绘）
+  if (res.error) { stDaily.textContent = '每日: ' + res.error; return; }
+  
+  // 根据 deleted_dates 剔除被删除的日期
+  // 只剔除那些被用户主动删除的日期，其他日期（包括值为0的正常日期）保留
+  const deletedSet = new Set(res.deleted_dates || []);
+  
+  // 找出需要保留的日期索引
+  const validIndices = [];
+  for (let t = 0; t < res.time_points.length; t++) {
+    const dateStr = res.time_points[t];
+    // 只剔除被标记为已删除的日期
+    if (!deletedSet.has(dateStr)) {
+      validIndices.push(t);
+    }
+  }
+  
+  // 构建过滤后的数据
+  const filteredRes = {
+    date: res.date,
+    time_points: validIndices.map(i => res.time_points[i]),
+    sectors: res.sectors.map(s => ({
+      name: s.name,
+      values: validIndices.map(i => s.values[i])
+    }))
+  };
+  
+  stDaily.textContent = '每日: ' + filteredRes.date + ' (' + filteredRes.time_points.length + '天)';
+  
+  const opt = makeOption(filteredRes, '净流入(亿元)');
+  if (opt) chartDaily.setOption(opt, true);
 }
 
 // ==================== 渲染分时图表 ====================
@@ -305,7 +313,7 @@ chartDaily.on('dblclick', function(params) {
     if (!params || !params.data) return;
     const pointDate = params.name;
     
-    if (!confirm(`确定要删除 ${pointDate} 这一天的数据吗？`)) {
+    if (!confirm(`确定要删除 ${pointDate} 这一天的数据吗？删除后将永久消失。`)) {
         return;
     }
     

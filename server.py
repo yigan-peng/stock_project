@@ -549,7 +549,6 @@ def do_merge_intraday_to_daily():
     conn.close()
 
     # ===== 从每日数据库中读取30天数据并构造前端显示数据 =====
-    # 重新读取数据库（确保是最新数据）
     conn = get_db(DB_DAILY)
     rows = conn.execute(
         "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
@@ -566,18 +565,15 @@ def do_merge_intraday_to_daily():
     
     # ===== 构造前端显示数据：30个自然日，横坐标日期，纵坐标每天15:00的值 =====
     today_date = datetime.now().date()
-    # 生成近30个自然日的日期列表（从今天往前推29天）
     dates = []
-    for i in range(29, -1, -1):  # 29, 28, ..., 0
+    for i in range(29, -1, -1):
         d = today_date - timedelta(days=i)
         dates.append(d.strftime("%Y-%m-%d"))
     
-    # 将数据库记录按日期建立索引，方便查找
     record_by_date = {}
     for rec in records:
         record_by_date[rec["date"]] = rec
     
-    # 取最近一天有数据的行业列表作为基准
     base_sectors = []
     for rec in reversed(records):
         if rec["sectors"]:
@@ -599,16 +595,19 @@ def do_merge_intraday_to_daily():
                             break
                     values.append(sector_value)
                 else:
-                    values.append(0)  # 没有数据的日期填0
+                    values.append(0)
             sectors_list.append({"name": name, "values": values})
     
+    # 标记被删除的日期（数据库中不存在的日期）
+    deleted_dates = [d for d in dates if d not in record_by_date]
+    
     result = {
-        "date": dates[-1],  # 最后一天是今天
-        "time_points": dates,  # 横坐标：30个自然日
-        "sectors": sectors_list  # 每个行业30个值
+        "date": dates[-1],
+        "time_points": dates,
+        "sectors": sectors_list,
+        "deleted_dates": deleted_dates  # 新增字段
     }
 
-    # 返回今天的记录
     print(f"✅ 分时数据已合并到每日: {len(intraday['sectors'])} 行业 × 241个时间点 | 共{len(records)}天数据")
     return result, None
 
@@ -659,7 +658,7 @@ async def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))  # 返回index.html文件
 
 # --- 每日数据API ---
-@app.get("/api/daily/history")          # GET请求：获取每日历史数据
+@app.get("/api/daily/history")
 async def daily_history():
     conn = get_db(DB_DAILY)
     rows = conn.execute(
@@ -675,19 +674,16 @@ async def daily_history():
             "sectors": json.loads(row["sectors"])
         })
     
-    # 生成近30个自然日的日期列表
     today_date = datetime.now().date()
     dates = []
     for i in range(29, -1, -1):
         d = today_date - timedelta(days=i)
         dates.append(d.strftime("%Y-%m-%d"))
     
-    # 按日期建立索引
     record_by_date = {}
     for rec in records:
         record_by_date[rec["date"]] = rec
     
-    # 取最近一天有数据的行业列表
     base_sectors = []
     for rec in reversed(records):
         if rec["sectors"]:
@@ -712,10 +708,14 @@ async def daily_history():
                     values.append(0)
             sectors_list.append({"name": name, "values": values})
     
+    # 标记被删除的日期（数据库中不存在的日期）
+    deleted_dates = [d for d in dates if d not in record_by_date]
+    
     return {
         "date": dates[-1],
-        "time_points": dates,  # 横坐标：30个自然日
-        "sectors": sectors_list  # 每个行业30个值
+        "time_points": dates,
+        "sectors": sectors_list,
+        "deleted_dates": deleted_dates  # 新增字段
     }
 
 # --- 分时数据API ---
@@ -804,16 +804,22 @@ async def merge_intraday():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     
-
 @app.get("/api/daily/delete_point")
 async def daily_delete_point(date: str = ""):
     if not date:
         return JSONResponse(status_code=400, content={"error": "缺少日期参数"})
 
     conn = get_db(DB_DAILY)
+    
+    # 直接删除该日期的数据库记录
+    conn.execute("DELETE FROM fund_flow WHERE date LIKE ?", (f"%{date}%",))
+    conn.commit()
+    
+    # 重新读取所有记录
     rows = conn.execute(
         "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
     ).fetchall()
+    conn.close()
     
     records = []
     for row in rows:
@@ -822,40 +828,6 @@ async def daily_delete_point(date: str = ""):
             "time_points": json.loads(row["time_points"]),
             "sectors": json.loads(row["sectors"])
         })
-
-    # 找到匹配的日期记录，将该日期对应行业的值设为 null（不是0）
-    found = False
-    for rec in records:
-        if date in rec["date"]:
-            found = True
-            # 找到该日期在 time_points 中的索引
-            date_idx = -1
-            for i, tp in enumerate(rec["time_points"]):
-                if date in tp:
-                    date_idx = i
-                    break
-            if date_idx >= 0:
-                # 将该日期对应所有行业的值设为 null
-                for s in rec["sectors"]:
-                    if date_idx < len(s["values"]):
-                        s["values"][date_idx] = None  # 设为 null 而非 0
-            break
-
-    if not found:
-        conn.close()
-        # 仍然返回正常数据
-    else:
-        # 重新写入数据库
-        conn.execute("DELETE FROM fund_flow")
-        for rec in records:
-            conn.execute(
-                "INSERT INTO fund_flow (date, time_points, sectors) VALUES (?, ?, ?)",
-                (rec["date"],
-                 json.dumps(rec["time_points"], ensure_ascii=False),
-                 json.dumps(rec["sectors"], ensure_ascii=False))
-            )
-        conn.commit()
-    conn.close()
 
     # 构造30天数据返回
     today_date = datetime.now().date()
@@ -883,16 +855,23 @@ async def daily_delete_point(date: str = ""):
                     sector_value = 0
                     for s in rec["sectors"]:
                         if s["name"] == name:
-                            # 注意：这里要保留 null 值，不能转为 0
-                            raw_val = s["values"][240] if len(s["values"]) > 240 else 0
-                            sector_value = raw_val if raw_val is not None else None
+                            sector_value = s["values"][240] if len(s["values"]) > 240 else 0
                             break
                     values.append(sector_value)
                 else:
-                    values.append(None)  # 没有数据的日期也设为 null
+                    values.append(0)
             sectors_list.append({"name": name, "values": values})
 
-    return {"date": dates[-1], "time_points": dates, "sectors": sectors_list}
+    # 返回额外字段：标记哪些日期是被删除的（数据库中不存在的日期）
+    deleted_dates = [d for d in dates if d not in record_by_date]
+
+    return {
+        "date": dates[-1],
+        "time_points": dates,
+        "sectors": sectors_list,
+        "deleted_dates": deleted_dates  # 新增字段，告诉前端哪些日期被删除了
+    }
+
 # ==================== 程序入口 ====================
 if __name__ == "__main__":              # 直接运行此文件时执行
     print("🚀 启动服务器...")            # 控制台提示
