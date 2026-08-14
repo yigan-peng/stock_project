@@ -61,13 +61,19 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 </div>
 <!-- ===== 图表1：每日净流入（近20交易日） ===== -->
 <div class="chart-wrap active" id="dailyWrap">
-  <div class="chart-title">每日净流入(亿元) · 近20交易日</div>  <!-- 图表标题 -->
-  <div id="chartDaily" style="width:100%;height:100%"></div>    <!-- ECharts渲染容器 -->
+  <div class="chart-title">每日净流入(亿元) · 近20交易日</div>
+  <label style="position:absolute;top:4px;right:80px;z-index:2;color:#8b949e;font-size:11px;cursor:pointer">
+    <input type="checkbox" id="selectAllDaily" checked> 全选
+  </label>
+  <div id="chartDaily" style="width:100%;height:100%"></div>
 </div>
 <!-- ===== 图表2：当天分时净流入 ===== -->
 <div class="chart-wrap" id="intradayWrap">
-  <div class="chart-title">当天分时净流入(亿元)</div>           <!-- 图表标题 -->
-  <div id="chartIntraday" style="width:100%;height:100%"></div> <!-- ECharts渲染容器 -->
+  <div class="chart-title">当天分时净流入(亿元)</div>
+  <label style="position:absolute;top:4px;right:80px;z-index:2;color:#8b949e;font-size:11px;cursor:pointer">
+    <input type="checkbox" id="selectAllIntraday" checked> 全选
+  </label>
+  <div id="chartIntraday" style="width:100%;height:100%"></div>
 </div>
 
 <script>
@@ -195,7 +201,10 @@ function renderDaily(res) {
   stDaily.textContent = '每日: ' + filteredRes.date + ' (' + filteredRes.time_points.length + '天)';
   
   const opt = makeOption(filteredRes, '净流入(亿元)');
-  if (opt) chartDaily.setOption(opt, true);
+  if (opt) {
+    chartDaily.setOption(opt, true);
+    bindSelectAll(chartDaily, 'selectAllDaily');
+  }
 }
 
 // ==================== 渲染分时图表 ====================
@@ -231,6 +240,7 @@ function renderIntraday(res, animate) {
         currentIdx = totalPoints;                  // 画完全部
         clearInterval(timer);                      // 停止定时器
         _intradayAnimating = false;                // 标记动画结束
+        bindSelectAll(chartIntraday, 'selectAllIntraday');
       }
       // 只更新series数据（合并模式，不影响坐标轴）
       const seriesUpdate = res.sectors.map((s, i) => ({
@@ -241,11 +251,33 @@ function renderIntraday(res, animate) {
   } else {
     chartIntraday.setOption(opt, true);              // 替换模式渲染
     chartIntraday.resize();
+    bindSelectAll(chartIntraday, 'selectAllIntraday');
   }
 }
 
 let _intradayAnimating = false;  // 分时动画进行中标志
 
+function bindSelectAll(chart, checkboxId) {
+  const checkbox = document.getElementById(checkboxId);
+  if (!checkbox) return;
+  
+  checkbox.addEventListener('change', function() {
+    if (this.checked) {
+      chart.dispatchAction({ type: 'legendSelectAll' });
+    } else {
+      chart.dispatchAction({ type: 'legendInverseSelect' });
+    }
+  });
+  
+  chart.on('legendselectchanged', function() {
+    const option = chart.getOption();
+    const legend = option.legend && option.legend[0];
+    if (!legend || !legend.selected) return;
+    const selected = legend.selected;
+    const allSelected = Object.values(selected).every(v => v === true);
+    checkbox.checked = allSelected;
+  });
+}
 // ==================== 按钮操作：刷新分时数据 ====================
 /**
  * 点击“🔄 刷新分时数据”按钮触发
