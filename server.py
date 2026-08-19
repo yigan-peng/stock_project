@@ -771,10 +771,18 @@ async def intraday_refresh():
             for s in existing["sectors"]:
                 s["values"].append(0.0)
             idx = len(tp) - 1
+            # 同时更新240点（15:00点）的数据
+            if len(tp) > 241:  # 有241点存在
+                for s in existing["sectors"]:
+                    s["values"][240] = snapshot.get(s["name"], 0)
         else:
             # 最后一个点已经是动态点 → 更新它（不新增）
-            tp[-1] = current_hm          # 更新时间标签
+            tp[-1] = current_hm
             idx = len(tp) - 1
+            # 如果当前有241点，也更新240点
+            if len(tp) > 241:
+                for s in existing["sectors"]:
+                    s["values"][240] = snapshot.get(s["name"], 0)
         # 更新该点的数据
         for s in existing["sectors"]:
             s["values"][idx] = snapshot.get(s["name"], 0)
