@@ -80,6 +80,7 @@ _collection_stop = threading.Event()    # 线程停止信号标志位，set()时
 _collection_idx = 0                     # 当前正在采集第几个点（0~N），也是进度指示器
 _collection_active = False              # 采集是否正在进行中的标志
 _collection_total = 241                 # 本次采集的总点数
+_collection_lock = threading.Lock()     # 线程锁：保护全局变量的并发访问
 
 # ==================== 数据库操作函数 ====================
 def get_db(path):
@@ -340,16 +341,23 @@ def _collection_worker():
     # --- 主采集循环：根据实际时间动态定位索引，每分钟采集一次 ---
     _collection_total = 241             # 固定241个点
     _collection_idx = 0
+    _last_fetch_time = 0  # 记录上次采集的时间戳，防止重复采集
     while _collection_idx < _collection_total and not _collection_stop.is_set():  # 未采集完且未收到停止信号
         try:
-            # --- 等待下一分钟到来（始终等待真实时间，不跳过） ---
+            # --- 等待下一分钟到来（修复版：使用更可靠的等待逻辑） ---
             print("⏳ 进入等待下一分钟...")
             prev_minute = datetime.now().minute  # 记录当前分钟
+            wait_start = time.time()  # 记录等待开始时间
             while not _collection_stop.is_set():
                 now = datetime.now()
-                if now.minute != prev_minute and now.second >= 1:  # 新的一分钟到了
+                # 修复：只要分钟变化就立即退出，不再要求秒数>=1
+                if now.minute != prev_minute:
                     break
-                _collection_stop.wait(timeout=0.3)  # 0.3秒检查一次
+                # 防止无限等待：如果等待超过65秒，强制退出
+                if time.time() - wait_start > 65:
+                    print(f"⚠️ 等待超时(65秒)，强制继续...")
+                    break
+                _collection_stop.wait(timeout=0.5)  # 0.5秒检查一次（稍微延长，减少CPU占用）
     
             if _collection_stop.is_set():   # 收到停止信号
                 break                       # 退出主循环
@@ -363,7 +371,7 @@ def _collection_worker():
                 if tp == actual_hm:
                     actual_idx = i
                     break
-            print("actual_idx:{actual_idx}")
+            print(f"actual_idx:{actual_idx}, current_hm:{actual_hm}")
             # 找不到对应索引（午休11:31~12:59或其他非交易时间）→ 跳过本次，不采集
             if actual_idx < 0:
                 # 计算下一个采集时间
@@ -381,20 +389,43 @@ def _collection_worker():
                 print(f"⏸️️  当前:{actual_hm} 非采集时间，跳过 | 下次采集:{next_time} | 已采集:{_collection_idx}/{_collection_total}")
                 continue  # 跳过本次循环，等待下一分钟
 
-            if actual_idx > _collection_idx:
-                _collection_idx = actual_idx  # 跳到实际时间对应的索引
-            elif actual_idx < _collection_idx:
-                pass  # 实际时间已超过当前索引，继续用当前索引（不后退）
-    
+            # 修复：防止索引跳跃导致漏采（使用线程锁保护）
+            with _collection_lock:
+                if actual_idx > _collection_idx + 1:
+                    # 如果跳跃超过1个点，记录警告但仍然跳跃（避免永久落后）
+                    print(f"⚠️ 索引跳跃: {_collection_idx} -> {actual_idx}，跳过 {actual_idx - _collection_idx - 1} 个点")
+                    _collection_idx = actual_idx
+                elif actual_idx == _collection_idx + 1:
+                    # 正常前进
+                    _collection_idx = actual_idx
+                elif actual_idx < _collection_idx:
+                    # 实际时间索引小于当前索引，说明跨天或时钟问题
+                    print(f"⚠️ 索引异常: actual_idx={actual_idx} < _collection_idx={_collection_idx}")
+                    pass  # 保持当前索引
+                # else: actual_idx == _collection_idx，保持不变
+        
             label_time = time_points[_collection_idx]  # 标签时间点（应等于实际时间）
             actual_time = now.strftime("%H:%M")        # 真实北京时间
             t_min = now.hour * 60 + now.minute
             is_trading = (now.weekday() < 5 and ((9*60+31 <= t_min <= 11*60+30) or (13*60 <= t_min <= 15*60)))
             trading_tag = "交易时间" if is_trading else "非交易时间"
     
-            # --- 执行采集 ---
+            # --- 执行采集（带超时保护） ---
             print(f"🔍 正在获取{label_time}的资金流向数据...")  # 采集前提示
-            snapshot = _fetch_snapshot()    # 调用API获取全行业即时快照
+            
+            # 使用线程池实现超时保护
+            import concurrent.futures
+            snapshot = None
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_fetch_snapshot)
+                    snapshot = future.result(timeout=30)  # 30秒超时
+            except concurrent.futures.TimeoutError:
+                print(f"⚠️ API请求超时(30秒)，跳过本次采集")
+                snapshot = {}
+            except Exception as e:
+                print(f"⚠️ API请求异常: {e}")
+                snapshot = {}
             if snapshot:                    # 如果获取成功
                 sector_count = len(snapshot)  # 获取到的行业数
                 # 首次采集时确定行业列表（按净流入排序取前20）
@@ -422,7 +453,8 @@ def _collection_worker():
             else:
                 print(f"❌ 获取失败: [{_collection_idx+1}/{_collection_total}] 标签:{label_time} 实际:{actual_time} [{trading_tag}] API返回空")
     
-            _collection_idx += 1            # 进度+1，准备采集下一个点
+            with _collection_lock:
+                _collection_idx += 1            # 进度+1，准备采集下一个点
     
         except Exception as e:
             # 捕获异常，防止线程崩溃，继续下一轮循环
