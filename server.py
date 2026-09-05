@@ -340,8 +340,9 @@ def _collection_worker():
 
     # --- 主采集循环：根据实际时间动态定位索引，每分钟采集一次 ---
     _collection_total = 241             # 固定241个点
-    _collection_idx = 0
+    # 注意：_collection_idx 已在上面的断点续采逻辑中正确设置，不要重置！
     _last_fetch_time = 0  # 记录上次采集的时间戳，防止重复采集
+    print(f"🚀 开始采集循环，起始索引: {_collection_idx}/241")
     while _collection_idx < _collection_total and not _collection_stop.is_set():  # 未采集完且未收到停止信号
         try:
             # --- 等待下一分钟到来（修复版：使用更可靠的等待逻辑） ---
