@@ -563,8 +563,8 @@ def do_merge_intraday_to_daily():
             "sectors": intraday["sectors"]
         })
 
-    # 超过30天则删除最早的
-    MAX_DAYS = 30
+    # 超过1080个交易日（约3年）则删除最早的
+    MAX_DAYS = 1080  # 30 * 36 = 1080个交易日
     while len(records) > MAX_DAYS:
         removed = records.pop(0)
         print(f"🗑️ 删除过期数据: {removed['date']}")
