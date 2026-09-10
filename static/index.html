@@ -161,9 +161,16 @@ function makeOption(res, yName) {
                 }).join('');
                 return '<div style="max-height:180px;overflow-y:auto;">' + title + items + '</div>';
               }},
-    legend: {data: res.sectors.map(s=>s.name), textStyle:{color:'#8b949e',fontSize:10},
-             top:28, right:16, type:'scroll', icon:'circle', itemWidth:8, itemHeight:8, itemGap:10},
-    grid: {left:'16px',right:'16px',bottom:'16px',top:68,containLabel:true},
+    legend: {data: res.sectors.map(s=>s.name), textStyle:{color:'#8b949e',fontSize:10,fixed:true},
+             top:68, right:8, width:'15%', type:'plain',
+             icon:'circle', itemWidth:8, itemHeight:8, itemGap:4,
+             formatter: function(name) {
+               // 每行固定3个，每列按8个字宽度对齐，不够8个字后面补全角空格
+               var s = name.length > 8 ? name.substring(0,8) : name;
+               while (s.length < 8) s += '\u3000';  // 全角空格，宽度等于一个汉字
+               return s;
+             }},
+    grid: {left:'16px',right:'20%',bottom:'16px',top:68,containLabel:true},
     xAxis: {type:'category', data:res.time_points,
             axisLine:{lineStyle:{color:'#30363d'}}, axisLabel:{color:'#8b949e',fontSize:10}},
     yAxis: {type:'value', name:yName, min:Y_MIN, max:Y_MAX,
