@@ -282,6 +282,16 @@ def _collection_worker():
             top5 = sorted_items[:5]
             top5_str = ", ".join(f"{n}({v:+.1f})" for n, v in top5)
             print(f"✅ 收盘数据已保存 [241/241] TOP5: {top5_str}")
+            # 自动合并到每日数据库
+            print("🔄 自动合并分时数据到每日数据库...")
+            try:
+                result, err = do_merge_intraday_to_daily()
+                if err:
+                    print(f"❌ 自动合并失败: {err}")
+                else:
+                    print(f"✅ 自动合并成功! 共{len(result.get('time_points', []))}天数据")
+            except Exception as e:
+                print(f"❌ 自动合并异常: {e}")
         else:
             print(f"❌ 收盘数据获取失败")
         _collection_active = False
@@ -469,6 +479,16 @@ def _collection_worker():
     # _collection_active = False          # 标记采集不再活跃
     if _collection_idx >= 241:          # 如果完成了全部241个点
         print("✅ 分时采集完成! 241/241 点")
+        # 自动合并到每日数据库
+        print("🔄 自动合并分时数据到每日数据库...")
+        try:
+            result, err = do_merge_intraday_to_daily()
+            if err:
+                print(f"❌ 自动合并失败: {err}")
+            else:
+                print(f"✅ 自动合并成功! 共{len(result.get('time_points', []))}天数据")
+        except Exception as e:
+            print(f"❌ 自动合并异常: {e}")
     else:                               # 被手动停止
         print(f"⛷ 分时采集已停止: {_collection_idx}/241 点")
 
