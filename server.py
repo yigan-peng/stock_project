@@ -771,6 +771,68 @@ async def daily_history():
         "deleted_dates": deleted_dates  # 新增字段
     }
 
+# --- 每日数据API（支持自定义天数） ---
+@app.get("/api/daily/history/{days}")
+async def daily_history_range(days: int):
+    """获取指定天数的每日历史数据"""
+    conn = get_db(DB_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, sectors FROM fund_flow ORDER BY date ASC"
+    ).fetchall()
+    conn.close()
+    
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "sectors": json.loads(row["sectors"])
+        })
+    
+    today_date = datetime.now().date()
+    dates = []
+    for i in range(days - 1, -1, -1):
+        d = today_date - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+    
+    record_by_date = {}
+    for rec in records:
+        record_by_date[rec["date"]] = rec
+    
+    base_sectors = []
+    for rec in reversed(records):
+        if rec["sectors"]:
+            base_sectors = rec["sectors"]
+            break
+    
+    sectors_list = []
+    if base_sectors:
+        for sector_template in base_sectors:
+            name = sector_template["name"]
+            values = []
+            for date_str in dates:
+                if date_str in record_by_date:
+                    rec = record_by_date[date_str]
+                    sector_value = 0
+                    for s in rec["sectors"]:
+                        if s["name"] == name:
+                            sector_value = s["values"][240] if len(s["values"]) > 240 else 0
+                            break
+                    values.append(sector_value)
+                else:
+                    values.append(0)
+            sectors_list.append({"name": name, "values": values})
+    
+    deleted_dates = [d for d in dates if d not in record_by_date]
+    
+    return {
+        "date": dates[-1] if dates else "",
+        "time_points": dates,
+        "sectors": sectors_list,
+        "deleted_dates": deleted_dates,
+        "days": days
+    }
+
 # --- 分时数据API ---
 @app.get("/api/intraday/history")       # GET请求：获取当天分时数据
 async def intraday_history():

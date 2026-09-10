@@ -39,6 +39,10 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 .chart-wrap.active{display:block}  /* 激活时显示 */
 /* ===== 图表标题（左上角悬浮文字） ===== */
 .chart-title{position:absolute;top:4px;left:14px;color:#8b949e;font-size:11px;z-index:1}
+/* ===== 时间范围选择按钮样式 ===== */
+.range-btn{background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:3px;padding:2px 8px;font-size:10px;cursor:pointer;transition:all .2s}
+.range-btn:hover{background:#30363d;color:#c9d1d9}
+.range-btn.active{background:#1f6feb;color:#fff;border-color:#1f6feb}
 </style>
 </head>
 <body>
@@ -59,9 +63,19 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   <div class="tab active" onclick="switchTab('daily')">📈 每日净流入</div>   <!-- Tab1：每日图表 -->
   <div class="tab" onclick="switchTab('intraday')">📉 当天分时</div>         <!-- Tab2：分时图表 -->
 </div>
-<!-- ===== 图表1：每日净流入（近20交易日） ===== -->
+<!-- ===== 图表1：每日净流入 ===== -->
 <div class="chart-wrap active" id="dailyWrap">
-  <div class="chart-title">每日净流入(亿元) · 近20交易日</div>
+  <div class="chart-title" id="dailyChartTitle">每日净流入(亿元) · 近1个月</div>
+  <!-- 时间范围选择按钮组（移到工具栏下方） -->
+  <div id="rangeBtnWrap" style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);z-index:10;display:flex;gap:6px;background:#161b22;padding:6px 12px;border-radius:6px;border:1px solid #30363d;">
+    <button class="range-btn active" data-days="30">近1月</button>
+    <button class="range-btn" data-days="60">近2月</button>
+    <button class="range-btn" data-days="90">近3月</button>
+    <button class="range-btn" data-days="180">近半年</button>
+    <button class="range-btn" data-days="365">近1年</button>
+    <button class="range-btn" data-days="730">近2年</button>
+    <button class="range-btn" data-days="1095">近3年</button>
+  </div>
   <label style="position:absolute;top:4px;right:80px;z-index:2;color:#8b949e;font-size:11px;cursor:pointer">
     <input type="checkbox" id="selectAllDaily" checked> 全选
   </label>
@@ -325,9 +339,39 @@ function doMergeIntraday() {
     .finally(()=>btn.disabled=false);               // 恢复按钮
 }
 
+// ==================== 当前选中的时间范围（默认30天） ====================
+let currentDays = 30;
+
+// ==================== 加载指定天数的每日数据 ====================
+function loadDailyData(days) {
+  currentDays = days;
+  stDaily.textContent = '每日: 加载中...';
+  fetch(`/api/daily/history/${days}`)
+    .then(r => r.json())
+    .then(j => {
+      renderDaily(j);
+      // 更新图表标题
+      const titleMap = {30:'近1个月',60:'近2个月',90:'近3个月',180:'近半年',365:'近1年',730:'近2年',1095:'近3年'};
+      document.getElementById('dailyChartTitle').textContent = '每日净流入(亿元) · ' + (titleMap[days] || days+'天');
+    })
+    .catch(e => { stDaily.textContent = '每日: 加载失败'; });
+}
+
+// ==================== 时间范围按钮点击事件 ====================
+document.querySelectorAll('.range-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    // 更新按钮样式
+    document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    // 加载对应天数的数据
+    const days = parseInt(this.dataset.days);
+    loadDailyData(days);
+  });
+});
+
 // ==================== 页面初始加载 ====================
-// 加载每日数据并渲染
-fetch('/api/daily/history').then(r=>r.json()).then(renderDaily);
+// 加载每日数据并渲染（默认30天）
+loadDailyData(30);
 // 加载分时数据并渲染
 fetch('/api/intraday/history').then(r=>r.json()).then(renderIntraday);
 
