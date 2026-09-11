@@ -249,6 +249,10 @@ function renderIntraday(res, animate) {
     // 先设置完整配置（坐标轴、图例等），数据为空
     const emptyOpt = JSON.parse(JSON.stringify(opt));  // 深拷贝
     emptyOpt.series = opt.series.map(s => ({...s, data: []}));  // 清空数据
+    // 修复：JSON序列化会丢失formatter函数，需要手动恢复
+    if (opt.legend && opt.legend.formatter) {
+      emptyOpt.legend.formatter = opt.legend.formatter;
+    }
     chartIntraday.setOption(emptyOpt, true);         // 设置框架（不合并）
     const totalPoints = res.time_points.length;    // 总点数
     const duration = 5000;                         // 5秒画完
