@@ -34,9 +34,11 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 /* ===== Tab悬浮效果 ===== */
 .tab:hover{color:#c9d1d9}
 /* ===== 图表容器：占据全部剩余空间 ===== */
-.chart-wrap{flex:1;position:relative;min-height:0;display:none}  /* 默认隐藏 */
+.chart-wrap{flex:1;position:relative;min-height:0;display:none;overflow:hidden}  /* 默认隐藏 */
 /* ===== 图表容器激活时显示 ===== */
 .chart-wrap.active{display:block}  /* 激活时显示 */
+/* ===== 热力图容器：允许纵向滚动 ===== */
+#heatmapWrap{overflow-y:auto}
 /* ===== 图表标题（左上角悬浮文字） ===== */
 .chart-title{position:absolute;top:4px;left:14px;color:#8b949e;font-size:11px;z-index:1}
 /* ===== 时间范围选择按钮样式 ===== */
@@ -62,6 +64,7 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 <div class="tabs">
   <div class="tab active" onclick="switchTab('daily')">📈 每日净流入</div>   <!-- Tab1：每日图表 -->
   <div class="tab" onclick="switchTab('intraday')">📉 当天分时</div>         <!-- Tab2：分时图表 -->
+  <div class="tab" onclick="switchTab('heatmap')">📊 资金热力图</div>        <!-- Tab3：热力图 -->
 </div>
 <!-- ===== 图表1：每日净流入 ===== -->
 <div class="chart-wrap active" id="dailyWrap">
@@ -89,12 +92,31 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   </label>
   <div id="chartIntraday" style="width:100%;height:100%"></div>
 </div>
+<!-- ===== 图表3：资金热力图 ===== -->
+<div class="chart-wrap" id="heatmapWrap">
+  <div class="chart-title" id="heatmapChartTitle">资金热力图(亿元) · 近1个月</div>
+  <!-- 时间范围选择按钮组 -->
+  <div id="heatmapRangeBtnWrap" style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);z-index:10;display:flex;gap:6px;background:#161b22;padding:6px 12px;border-radius:6px;border:1px solid #30363d;">
+    <button class="range-btn active" data-heatmap-days="30">近1月</button>
+    <button class="range-btn" data-heatmap-days="90">近3月</button>
+    <button class="range-btn" data-heatmap-days="180">近半年</button>
+    <button class="range-btn" data-heatmap-days="365">近1年</button>
+  </div>
+  <!-- 排序按钮 -->
+  <div style="position:absolute;top:-4px;right:14px;z-index:10;display:flex;gap:6px;align-items:center;">
+    <span style="color:#8b949e;font-size:10px;">排序:</span>
+    <button class="range-btn active" id="sortBtnSum" onclick="sortHeatmap('sum')">累计净流入</button>
+    <button class="range-btn" id="sortBtnName" onclick="sortHeatmap('name')">名称</button>
+  </div>
+  <div id="chartHeatmap" style="width:100%;height:100%"></div>
+</div>
 
 <script>
 // ==================== 初始化图表实例 ====================
 // 获取DOM元素并创建ECharts实例（每个div一个独立图表）
 const chartDaily = echarts.init(document.getElementById('chartDaily'));      // 每日图表
 const chartIntraday = echarts.init(document.getElementById('chartIntraday')); // 分时图表
+const chartHeatmap = echarts.init(document.getElementById('chartHeatmap'));  // 热力图图表
 
 // ==================== 获取DOM元素引用 ====================
 const stDaily = document.getElementById('stDaily');       // 每日状态文字元素
@@ -119,20 +141,26 @@ const Y_MAX = 430;   // Y轴上限
 // ==================== Tab切换逻辑 ====================
 /**
  * 切换每日/分时图表页面
- * name: 'daily' 或 'intraday'
+ * name: 'daily' 或 'intraday' 或 'heatmap'
  */
 function switchTab(name) {
   // 更新Tab按钮样式
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));  // 移除所有active
   const tabs = document.querySelectorAll('.tab');  // 获取所有tab
   if (name === 'daily') tabs[0].classList.add('active');   // 激活第一个tab
-  else tabs[1].classList.add('active');                     // 激活第二个tab
+  else if (name === 'intraday') tabs[1].classList.add('active');  // 激活第二个tab
+  else tabs[2].classList.add('active');                     // 激活第三个tab
   // 更新图表容器显示
   document.querySelectorAll('.chart-wrap').forEach(w => w.classList.remove('active'));  // 隐藏所有图表
-  if (name === 'daily') document.getElementById('dailyWrap').classList.add('active');  // 显示每日图表
-  else document.getElementById('intradayWrap').classList.add('active');                 // 显示分时图表
+  if (name === 'daily') document.getElementById('dailyWrap').classList.add('active');
+  else if (name === 'intraday') document.getElementById('intradayWrap').classList.add('active');
+  else document.getElementById('heatmapWrap').classList.add('active');
   // 切换后需要resize图表（ECharts需要重新计算尺寸）
-  setTimeout(() => { chartDaily.resize(); chartIntraday.resize(); }, 50);
+  setTimeout(() => { chartDaily.resize(); chartIntraday.resize(); chartHeatmap.resize(); }, 50);
+  // 切换到热力图时自动加载数据
+  if (name === 'heatmap' && !heatmapLoaded) {
+    loadHeatmapData(currentHeatmapDays);
+  }
 }
 
 // ==================== 通用图表配置生成 ====================
@@ -420,6 +448,266 @@ chartDaily.on('dblclick', function(params) {
     });
 });
 
+// ==================== 热力图相关变量 ====================
+let currentHeatmapDays = 30;   // 当前热力图时间范围
+let heatmapLoaded = false;     // 是否已加载过热力图数据
+let heatmapRawData = null;     // 原始API返回数据（用于排序切换）
+let heatmapSortMode = 'sum';   // 排序模式：'sum' 或 'name'
+
+// ==================== 加载热力图数据 ====================
+function loadHeatmapData(days) {
+  currentHeatmapDays = days;
+  document.getElementById('heatmapChartTitle').textContent = '资金热力图(亿元) · 加载中...';
+  fetch(`/api/heatmap/${days}`)
+    .then(r => r.json())
+    .then(j => {
+      if (j.error) {
+        document.getElementById('heatmapChartTitle').textContent = '资金热力图: ' + j.error;
+        return;
+      }
+      heatmapRawData = j;
+      heatmapLoaded = true;
+      renderHeatmap(j, heatmapSortMode);
+    })
+    .catch(e => {
+      document.getElementById('heatmapChartTitle').textContent = '资金热力图: 加载失败';
+    });
+}
+
+// ==================== 渲染热力图 ====================
+function renderHeatmap(data, sortMode) {
+  if (!data || !data.dates || !data.sectors) return;
+  
+  const titleMap = {30:'近1个月',90:'近3个月',180:'近半年',365:'近1年'};
+  document.getElementById('heatmapChartTitle').textContent = '资金热力图(亿元) · ' + (titleMap[currentHeatmapDays] || currentHeatmapDays+'天');
+  
+  // 计算每个行业的累计净流入
+  let sectorsWithSum = data.sectors.map(s => {
+    const sum = s.values.reduce((a, b) => a + b, 0);
+    return { name: s.name, values: s.values, sum: sum };
+  });
+  
+  // 排序
+  if (sortMode === 'sum') {
+    sectorsWithSum.sort((a, b) => b.sum - a.sum);  // 累计净流入降序
+  } else {
+    sectorsWithSum.sort((a, b) => a.name.localeCompare(b.name, 'zh'));  // 名称排序
+  }
+  
+  const sectorNames = sectorsWithSum.map(s => s.name);
+  const dates = data.dates;
+  
+  // 构建热力图数据 [日期索引, 行业索引, 值]
+  const heatmapData = [];
+  let maxVal = 0;
+  let maxSum = 0;
+  for (let y = 0; y < sectorsWithSum.length; y++) {
+    for (let x = 0; x < dates.length; x++) {
+      const val = sectorsWithSum[y].values[x] || 0;
+      heatmapData.push([x, y, val]);
+      if (Math.abs(val) > maxVal) maxVal = Math.abs(val);
+    }
+    if (Math.abs(sectorsWithSum[y].sum) > maxSum) maxSum = Math.abs(sectorsWithSum[y].sum);
+  }
+  
+  // 确保 maxVal 不为0
+  if (maxVal === 0) maxVal = 1;
+  if (maxSum === 0) maxSum = 1;
+  
+  // 合计柱状图数据
+  const sumBarData = sectorsWithSum.map(s => s.sum);
+  
+  const option = {
+    backgroundColor: '#0d1117',
+    tooltip: {
+      confine: true,
+      position: function(point, params, dom, rect, size) {
+        if (params && params.data && params.data[1] !== undefined && params.data[1] < 5) {
+          return [point[0] - size.contentSize[0] / 2, point[1] + 10];
+        }
+        return [point[0] - size.contentSize[0] / 2, point[1] - size.contentSize[1] - 10];
+      },
+      backgroundColor: '#1c2333',
+      borderColor: '#30363d',
+      textStyle: { color: '#c9d1d9', fontSize: 11 },
+      formatter: function(p) {
+        if (p.seriesType === 'bar') {
+          const sector = sectorNames[p.dataIndex];
+          const val = p.value;
+          const sign = val > 0 ? '+' : '';
+          const color = val > 0 ? '#ff4d4f' : val < 0 ? '#00c853' : '#8b949e';
+          return '<b style="color:#58a6ff">' + sector + '</b><br>' +
+                 '合计: <span style="color:' + color + '">' + sign + val.toFixed(2) + ' 亿</span>';
+        }
+        const date = dates[p.data[0]];
+        const sector = sectorNames[p.data[1]];
+        const val = p.data[2];
+        const sign = val > 0 ? '+' : '';
+        const color = val > 0 ? '#ff4d4f' : val < 0 ? '#00c853' : '#8b949e';
+        return '<b style="color:#58a6ff">' + sector + '</b><br>' +
+               date + ': <span style="color:' + color + '">' + sign + val.toFixed(2) + ' 亿</span>';
+      }
+    },
+    grid: [
+      { top: 40, bottom: 60, left: 100, right: '12%' },
+      { top: 40, bottom: 60, right: 10, width: '8%' }
+    ],
+    xAxis: [
+      {
+        type: 'category',
+        data: dates,
+        gridIndex: 0,
+        axisLine: { lineStyle: { color: '#30363d' } },
+        axisLabel: {
+          color: '#8b949e',
+          fontSize: 9,
+          rotate: dates.length > 60 ? 45 : 0,
+          interval: dates.length > 60 ? Math.floor(dates.length / 15) : 0
+        },
+        splitArea: { show: false }
+      },
+      {
+        type: 'value',
+        gridIndex: 1,
+        axisLine: { lineStyle: { color: '#30363d' } },
+        axisLabel: { show: false },
+        splitLine: { show: false },
+        axisTick: { show: false }
+      }
+    ],
+    yAxis: [
+      {
+        type: 'category',
+        data: sectorNames,
+        gridIndex: 0,
+        axisLine: { lineStyle: { color: '#30363d' } },
+        axisLabel: { color: '#8b949e', fontSize: 10, width: 80, overflow: 'truncate' },
+        splitArea: { show: false }
+
+      },
+      {
+        type: 'category',
+        data: sectorNames,
+        gridIndex: 1,
+        axisLine: { show: false },
+        axisLabel: { show: false },
+        axisTick: { show: false },
+        splitArea: { show: false }
+      }
+    ],
+    visualMap: [
+      {
+        min: -maxVal,
+        max: maxVal,
+        calculable: true,
+        orient: 'horizontal',
+        left: 'center',
+        bottom: 4,
+        inRange: {
+          color: ['#00c853', '#1b5e20', '#2e2e2e', '#b71c1c', '#ff1744']
+        },
+        textStyle: { color: '#8b949e', fontSize: 10 },
+        text: ['流入', '流出'],
+        itemWidth: 12,
+        itemHeight: 120,
+        seriesIndex: 0
+      },
+      {
+        min: -maxSum,
+        max: maxSum,
+        show: false,
+        inRange: {
+          color: ['#00c853', '#1b5e20', '#2e2e2e', '#b71c1c', '#ff1744']
+        },
+        seriesIndex: 1
+      }
+    ],
+    series: [
+      {
+        name: '净流入',
+        type: 'heatmap',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: heatmapData,
+        label: {
+          show: dates.length <= 30 && sectorNames.length <= 30,
+          fontSize: 8,
+          color: '#c9d1d9',
+          formatter: function(p) {
+            const v = p.data[2];
+            if (v === 0) return '';
+            return v > 0 ? '+' + v.toFixed(0) : v.toFixed(0);
+          }
+        },
+        emphasis: {
+          itemStyle: {
+            shadowBlur: 6,
+            shadowColor: 'rgba(0,0,0,0.5)'
+          }
+        },
+        itemStyle: {
+          borderColor: '#0d1117',
+          borderWidth: 1
+        }
+      },
+      {
+        name: '合计',
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: sumBarData,
+        barWidth: '70%',
+        label: {
+          show: true,
+          position: 'right',
+          fontSize: 9,
+          color: '#8b949e',
+          formatter: function(p) {
+            const v = p.value;
+            if (v === 0) return '';
+            const sign = v > 0 ? '+' : '';
+            return sign + v.toFixed(0);
+          }
+        },
+        itemStyle: {
+          borderColor: '#0d1117',
+          borderWidth: 1
+        }
+      }
+    ]
+  };
+  // 动态计算图表高度：每个行业至少22px，确保90个行业都能显示且不重叠
+  const minChartHeight = Math.max(400, sectorNames.length * 12 + 100);
+  const chartDiv = document.getElementById('chartHeatmap');
+  chartDiv.style.height = minChartHeight + 'px';
+  chartHeatmap.resize();
+  chartHeatmap.setOption(option, true);
+}
+
+// ==================== 热力图排序切换 ====================
+function sortHeatmap(mode) {
+  heatmapSortMode = mode;
+  // 更新按钮样式
+  document.getElementById('sortBtnSum').classList.toggle('active', mode === 'sum');
+  document.getElementById('sortBtnName').classList.toggle('active', mode === 'name');
+  // 重新渲染
+  if (heatmapRawData) {
+    renderHeatmap(heatmapRawData, mode);
+  }
+}
+
+// ==================== 热力图时间范围按钮事件 ====================
+document.querySelectorAll('[data-heatmap-days]').forEach(btn => {
+  btn.addEventListener('click', function() {
+    // 更新按钮样式（只更新热力图按钮）
+    document.querySelectorAll('[data-heatmap-days]').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    // 加载对应天数的数据
+    const days = parseInt(this.dataset.heatmapDays);
+    loadHeatmapData(days);
+  });
+});
+     
 </script>
 </body>
 </html>

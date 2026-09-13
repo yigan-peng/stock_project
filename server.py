@@ -833,6 +833,63 @@ async def daily_history_range(days: int):
         "days": days
     }
 
+# --- 热力图数据API ---
+@app.get("/api/heatmap/{days}")
+async def heatmap_data(days: int = 30):
+    """
+    获取热力图数据：返回指定天数内每个行业每天的净流入值
+    返回格式: { dates: [...], sectors: [{name, values: [...]}, ...] }
+    """
+    conn = get_db(DB_DAILY)
+    rows = conn.execute(
+        "SELECT date, sectors FROM fund_flow ORDER BY date ASC"
+    ).fetchall()
+    conn.close()
+    
+    # 计算日期范围
+    today_date = datetime.now().date()
+    dates = []
+    for i in range(days - 1, -1, -1):
+        d = today_date - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+    
+    # 按日期索引记录
+    record_by_date = {}
+    for row in rows:
+        record_by_date[row["date"]] = json.loads(row["sectors"])
+    
+    # 获取所有行业名（从最近有数据的记录中获取）
+    all_sector_names_set = set()
+    for date_str in dates:
+        if date_str in record_by_date:
+            sectors = record_by_date[date_str]
+            if sectors:
+                for s in sectors:
+                    all_sector_names_set.add(s["name"])
+    all_sector_names = sorted(all_sector_names_set)
+    
+    # 构建每个行业的数据
+    sectors_list = []
+    for name in all_sector_names:
+        values = []
+        for date_str in dates:
+            if date_str in record_by_date:
+                sectors = record_by_date[date_str]
+                val = 0
+                for s in sectors:
+                    if s["name"] == name:
+                        val = s["values"][240] if len(s["values"]) > 240 else 0
+                        break
+                values.append(val)
+            else:
+                values.append(0)
+        sectors_list.append({"name": name, "values": values})
+    
+    return {
+        "dates": dates,
+        "sectors": sectors_list
+    }
+  
 # --- 分时数据API ---
 @app.get("/api/intraday/history")       # GET请求：获取当天分时数据
 async def intraday_history():
