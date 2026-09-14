@@ -37,8 +37,25 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 .chart-wrap{flex:1;position:relative;min-height:0;display:none;overflow:hidden}  /* 默认隐藏 */
 /* ===== 图表容器激活时显示 ===== */
 .chart-wrap.active{display:block}  /* 激活时显示 */
-/* ===== 热力图容器：允许纵向滚动 ===== */
-#heatmapWrap{overflow-y:auto}
+/* ===== 热力图容器：允许纵向和横向滚动 ===== */
+#heatmapWrap{overflow-y:auto;overflow-x:auto}
+/* ===== 趋势分析容器：允许纵向滚动 ===== */
+#trendWrap{overflow-y:auto}
+/* ===== 趋势分析卡片样式 ===== */
+.trend-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin:8px 14px;display:flex;align-items:center;gap:16px;transition:all .2s}
+.trend-card:hover{border-color:#58a6ff;background:#1c2333}
+.trend-rank{font-size:20px;font-weight:700;color:#58a6ff;min-width:36px;text-align:center}
+.trend-info{flex:1;min-width:0}
+.trend-name{font-size:14px;font-weight:600;color:#c9d1d9;margin-bottom:4px}
+.trend-indicators{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#8b949e}
+.trend-indicators span{background:#21262d;padding:2px 6px;border-radius:3px}
+.trend-score-wrap{text-align:center;min-width:80px}
+.trend-score{font-size:28px;font-weight:700;line-height:1}
+.trend-signal{font-size:11px;margin-top:4px;padding:2px 8px;border-radius:3px;font-weight:600}
+.trend-summary{display:flex;gap:12px;padding:10px 14px;flex-wrap:wrap}
+.trend-summary-item{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:8px 14px;text-align:center;min-width:80px}
+.trend-summary-item .num{font-size:20px;font-weight:700}
+.trend-summary-item .label{font-size:10px;color:#8b949e;margin-top:2px}
 /* ===== 图表标题（左上角悬浮文字） ===== */
 .chart-title{position:absolute;top:4px;left:14px;color:#8b949e;font-size:11px;z-index:1}
 /* ===== 时间范围选择按钮样式 ===== */
@@ -65,6 +82,7 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   <div class="tab active" onclick="switchTab('daily')">📈 每日净流入</div>   <!-- Tab1：每日图表 -->
   <div class="tab" onclick="switchTab('intraday')">📉 当天分时</div>         <!-- Tab2：分时图表 -->
   <div class="tab" onclick="switchTab('heatmap')">📊 资金热力图</div>        <!-- Tab3：热力图 -->
+  <div class="tab" onclick="switchTab('trend')">🔮 趋势分析</div>            <!-- Tab4：趋势分析 -->
 </div>
 <!-- ===== 图表1：每日净流入 ===== -->
 <div class="chart-wrap active" id="dailyWrap">
@@ -97,6 +115,10 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   <div class="chart-title" id="heatmapChartTitle">资金热力图(亿元) · 近1个月</div>
   <!-- 时间范围选择按钮组 -->
   <div id="heatmapRangeBtnWrap" style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);z-index:10;display:flex;gap:6px;background:#161b22;padding:6px 12px;border-radius:6px;border:1px solid #30363d;">
+    <button class="range-btn" data-heatmap-days="3">近3日</button>
+    <button class="range-btn" data-heatmap-days="5">近5日</button>
+    <button class="range-btn" data-heatmap-days="10">近10日</button>
+    <button class="range-btn" data-heatmap-days="20">近20日</button>
     <button class="range-btn active" data-heatmap-days="30">近1月</button>
     <button class="range-btn" data-heatmap-days="90">近3月</button>
     <button class="range-btn" data-heatmap-days="180">近半年</button>
@@ -108,7 +130,19 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
     <button class="range-btn active" id="sortBtnSum" onclick="sortHeatmap('sum')">累计净流入</button>
     <button class="range-btn" id="sortBtnName" onclick="sortHeatmap('name')">名称</button>
   </div>
-  <div id="chartHeatmap" style="width:100%;height:100%"></div>
+  <div id="chartHeatmap" style="width:100%;height:100%;min-width:900px"></div>
+</div>
+<!-- ===== 图表4：趋势分析 ===== -->
+<div class="chart-wrap" id="trendWrap">
+  <div class="chart-title" id="trendChartTitle">🔮 趋势分析 · 近1个月</div>
+  <!-- 时间范围选择按钮组 -->
+  <div id="trendRangeBtnWrap" style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);z-index:10;display:flex;gap:6px;background:#161b22;padding:6px 12px;border-radius:6px;border:1px solid #30363d;">
+    <button class="range-btn active" data-trend-days="30">近1月</button>
+    <button class="range-btn" data-trend-days="60">近2月</button>
+    <button class="range-btn" data-trend-days="90">近3月</button>
+    <button class="range-btn" data-trend-days="180">近半年</button>
+  </div>
+  <div id="trendContent" style="padding-top:36px;"></div>
 </div>
 
 <script>
@@ -140,8 +174,8 @@ const Y_MAX = 430;   // Y轴上限
 
 // ==================== Tab切换逻辑 ====================
 /**
- * 切换每日/分时图表页面
- * name: 'daily' 或 'intraday' 或 'heatmap'
+ * 切换每日/分时/热力图/趋势分析图表页面
+ * name: 'daily' 或 'intraday' 或 'heatmap' 或 'trend'
  */
 function switchTab(name) {
   // 更新Tab按钮样式
@@ -149,17 +183,23 @@ function switchTab(name) {
   const tabs = document.querySelectorAll('.tab');  // 获取所有tab
   if (name === 'daily') tabs[0].classList.add('active');   // 激活第一个tab
   else if (name === 'intraday') tabs[1].classList.add('active');  // 激活第二个tab
-  else tabs[2].classList.add('active');                     // 激活第三个tab
+  else if (name === 'heatmap') tabs[2].classList.add('active');   // 激活第三个tab
+  else if (name === 'trend') tabs[3].classList.add('active');     // 激活第四个tab
   // 更新图表容器显示
   document.querySelectorAll('.chart-wrap').forEach(w => w.classList.remove('active'));  // 隐藏所有图表
   if (name === 'daily') document.getElementById('dailyWrap').classList.add('active');
   else if (name === 'intraday') document.getElementById('intradayWrap').classList.add('active');
-  else document.getElementById('heatmapWrap').classList.add('active');
+  else if (name === 'heatmap') document.getElementById('heatmapWrap').classList.add('active');
+  else if (name === 'trend') document.getElementById('trendWrap').classList.add('active');
   // 切换后需要resize图表（ECharts需要重新计算尺寸）
   setTimeout(() => { chartDaily.resize(); chartIntraday.resize(); chartHeatmap.resize(); }, 50);
   // 切换到热力图时自动加载数据
   if (name === 'heatmap' && !heatmapLoaded) {
     loadHeatmapData(currentHeatmapDays);
+  }
+  // 切换到趋势分析时自动加载数据
+  if (name === 'trend' && !trendLoaded) {
+    loadTrendData(currentTrendDays);
   }
 }
 
@@ -478,7 +518,7 @@ function loadHeatmapData(days) {
 function renderHeatmap(data, sortMode) {
   if (!data || !data.dates || !data.sectors) return;
   
-  const titleMap = {30:'近1个月',90:'近3个月',180:'近半年',365:'近1年'};
+  const titleMap = {3:'近3日',5:'近5日',10:'近10日',20:'近20日',30:'近1个月',90:'近3个月',180:'近半年',365:'近1年'};
   document.getElementById('heatmapChartTitle').textContent = '资金热力图(亿元) · ' + (titleMap[currentHeatmapDays] || currentHeatmapDays+'天');
   
   // 计算每个行业的累计净流入
@@ -549,8 +589,8 @@ function renderHeatmap(data, sortMode) {
       }
     },
     grid: [
-      { top: 40, bottom: 60, left: 100, right: '12%' },
-      { top: 40, bottom: 60, right: 10, width: '8%' }
+      { top: 40, bottom: 60, left: 100, right: '18%' },
+      { top: 40, bottom: 60, right: 10, width: '14%' }
     ],
     xAxis: [
       {
@@ -590,7 +630,13 @@ function renderHeatmap(data, sortMode) {
         data: sectorNames,
         gridIndex: 1,
         axisLine: { show: false },
-        axisLabel: { show: false },
+        axisLabel: { 
+          show: true, 
+          color: '#8b949e', 
+          fontSize: 9,
+          width: 60,
+          overflow: 'truncate'
+        },
         axisTick: { show: false },
         splitArea: { show: false }
       }
@@ -705,6 +751,113 @@ document.querySelectorAll('[data-heatmap-days]').forEach(btn => {
     // 加载对应天数的数据
     const days = parseInt(this.dataset.heatmapDays);
     loadHeatmapData(days);
+  });
+});
+
+// ==================== 趋势分析相关变量 ====================
+let currentTrendDays = 30;   // 当前趋势分析时间范围
+let trendLoaded = false;     // 是否已加载过趋势分析数据
+
+// ==================== 加载趋势分析数据 ====================
+function loadTrendData(days) {
+  currentTrendDays = days;
+  document.getElementById('trendChartTitle').textContent = '🔮 趋势分析 · 加载中...';
+  document.getElementById('trendContent').innerHTML = '<div style="text-align:center;padding:40px;color:#8b949e;">⏳ 正在分析数据...</div>';
+  fetch(`/api/trend/analysis/${days}`)
+    .then(r => r.json())
+    .then(j => {
+      if (j.error) {
+        document.getElementById('trendChartTitle').textContent = '🔮 趋势分析: ' + j.error;
+        document.getElementById('trendContent').innerHTML = '<div style="text-align:center;padding:40px;color:#f85149;">❌ ' + j.error + '</div>';
+        return;
+      }
+      trendLoaded = true;
+      renderTrend(j);
+    })
+    .catch(e => {
+      document.getElementById('trendChartTitle').textContent = '🔮 趋势分析: 加载失败';
+      document.getElementById('trendContent').innerHTML = '<div style="text-align:center;padding:40px;color:#f85149;">❌ 网络请求失败</div>';
+    });
+}
+
+// ==================== 渲染趋势分析 ====================
+function renderTrend(data) {
+  if (!data || !data.sectors) return;
+  
+  const titleMap = {30:'近1个月',60:'近2个月',90:'近3个月',180:'近半年'};
+  document.getElementById('trendChartTitle').textContent = '🔮 趋势分析 · ' + (titleMap[currentTrendDays] || currentTrendDays+'天') + ' (' + data.analysis_date + ')';
+  
+  const container = document.getElementById('trendContent');
+  let html = '';
+  
+  // 1. 汇总统计卡片
+  const summary = data.summary;
+  html += '<div class="trend-summary">';
+  html += '<div class="trend-summary-item"><div class="num" style="color:#ff1744">' + summary.strong_buy + '</div><div class="label">强烈买入</div></div>';
+  html += '<div class="trend-summary-item"><div class="num" style="color:#ff5252">' + summary.buy + '</div><div class="label">建议买入</div></div>';
+  html += '<div class="trend-summary-item"><div class="num" style="color:#ffc107">' + summary.hold + '</div><div class="label">观望</div></div>';
+  html += '<div class="trend-summary-item"><div class="num" style="color:#4caf50">' + summary.sell + '</div><div class="label">建议减仓</div></div>';
+  html += '<div class="trend-summary-item"><div class="num" style="color:#00c853">' + summary.strong_sell + '</div><div class="label">建议卖出</div></div>';
+  html += '</div>';
+  
+  // 2. 说明文字
+  html += '<div style="padding:4px 14px 8px;font-size:10px;color:#8b949e;">';
+  html += '💡 评分基于资金流向动量、趋势强度(RSI)、均线排列、近期趋势等综合计算 | 仅供参考，不构成投资建议';
+  html += '</div>';
+  
+  // 3. 行业卡片列表
+  data.sectors.forEach((s, idx) => {
+    const rank = idx + 1;
+    const maStatus = s.ma_bullish ? '🟢多头' : (s.ma_bearish ? '🔴空头' : '⚪震荡');
+    const trendDir = s.recent_trend > 0 ? '📈' : (s.recent_trend < 0 ? '📉' : '➡️');
+    
+    html += '<div class="trend-card">';
+    // 排名
+    html += '<div class="trend-rank">' + rank + '</div>';
+    // 信息区
+    html += '<div class="trend-info">';
+    html += '<div class="trend-name">' + s.name + '</div>';
+    html += '<div class="trend-indicators">';
+    html += '<span>MA5: ' + s.ma5.toFixed(1) + '</span>';
+    html += '<span>MA10: ' + s.ma10.toFixed(1) + '</span>';
+    html += '<span>MA20: ' + s.ma20.toFixed(1) + '</span>';
+    html += '<span>动量: ' + (s.momentum > 0 ? '+' : '') + s.momentum.toFixed(1) + '%</span>';
+    html += '<span>RSI: ' + s.trend_strength.toFixed(0) + '</span>';
+    html += '<span>波动: ' + s.volatility.toFixed(1) + '</span>';
+    html += '<span>累计: ' + (s.total_inflow > 0 ? '+' : '') + s.total_inflow.toFixed(1) + '亿</span>';
+    html += '<span>' + trendDir + ' 近5日: ' + (s.recent_trend > 0 ? '+' : '') + s.recent_trend.toFixed(1) + '</span>';
+    html += '<span>' + maStatus + '</span>';
+    // 新增指标
+    var longTermColor = s.long_term_avg >= 0 ? '#ff5252' : '#00c853';
+    html += '<span style="color:' + longTermColor + '">长期均值: ' + (s.long_term_avg > 0 ? '+' : '') + s.long_term_avg.toFixed(2) + '</span>';
+    var slopeColor = s.slope >= 0 ? '#ff5252' : '#00c853';
+    html += '<span style="color:' + slopeColor + '">趋势斜率: ' + (s.slope > 0 ? '+' : '') + s.slope.toFixed(3) + '</span>';
+    html += '<span>流入率: ' + s.consistency.toFixed(0) + '%</span>';
+    var accelColor = s.trend_accel >= 0 ? '#ff5252' : '#00c853';
+    html += '<span style="color:' + accelColor + '">加速度: ' + (s.trend_accel > 0 ? '+' : '') + s.trend_accel.toFixed(2) + '</span>';
+    html += '<span>历史分位: ' + s.percentile.toFixed(0) + '%</span>';
+    html += '</div>';
+    html += '</div>';
+    // 评分和信号
+    html += '<div class="trend-score-wrap">';
+    html += '<div class="trend-score" style="color:' + s.signal_color + '">' + s.score.toFixed(0) + '</div>';
+    html += '<div class="trend-signal" style="background:' + s.signal_color + '22;color:' + s.signal_color + '">' + s.signal + '</div>';
+    html += '</div>';
+    html += '</div>';
+  });
+  
+  container.innerHTML = html;
+}
+
+// ==================== 趋势分析时间范围按钮事件 ====================
+document.querySelectorAll('[data-trend-days]').forEach(btn => {
+  btn.addEventListener('click', function() {
+    // 更新按钮样式（只更新趋势分析按钮）
+    document.querySelectorAll('[data-trend-days]').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    // 加载对应天数的数据
+    const days = parseInt(this.dataset.trendDays);
+    loadTrendData(days);
   });
 });
      

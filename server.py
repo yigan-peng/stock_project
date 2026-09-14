@@ -1052,6 +1052,268 @@ async def daily_delete_point(date: str = ""):
         "deleted_dates": deleted_dates  # 新增字段，告诉前端哪些日期被删除了
     }
 
+# ==================== 趋势分析API ====================
+@app.get("/api/trend/analysis/{days}")
+async def trend_analysis(days: int = 30):
+    """
+    趋势分析API：基于历史资金流向数据，计算技术指标并给出买入/卖出建议
+    
+    指标说明：
+    1. MA5/MA10/MA20: 5/10/20日移动平均净流入
+    2. momentum: 动量指标（短期vs长期资金流向变化率）
+    3. trend_strength: 趋势强度（0-100，类似RSI）
+    4. volatility: 波动率（资金流向的稳定性）
+    5. score: 综合评分（0-100，越高越适合买入）
+    6. signal: 买入/卖出/观望信号
+    """
+    conn = get_db(DB_DAILY)
+    rows = conn.execute(
+        "SELECT date, sectors FROM fund_flow ORDER BY date ASC"
+    ).fetchall()
+    conn.close()
+    
+    # 获取日期范围（需要额外历史数据用于计算MA20）
+    today_date = datetime.now().date()
+    lookback = max(days, 60)  # 至少需要60天历史数据
+    all_dates = []
+    for i in range(lookback - 1, -1, -1):
+        d = today_date - timedelta(days=i)
+        all_dates.append(d.strftime("%Y-%m-%d"))
+    
+    # 按日期索引记录
+    record_by_date = {}
+    for row in rows:
+        record_by_date[row["date"]] = json.loads(row["sectors"])
+    
+    # 获取所有行业名
+    all_sector_names = set()
+    for date_str in all_dates:
+        if date_str in record_by_date:
+            sectors = record_by_date[date_str]
+            if sectors:
+                for s in sectors:
+                    all_sector_names.add(s["name"])
+    all_sector_names = sorted(all_sector_names)
+    
+    # 构建每个行业的完整时间序列
+    sector_data = {}
+    for name in all_sector_names:
+        values = []
+        for date_str in all_dates:
+            if date_str in record_by_date:
+                sectors = record_by_date[date_str]
+                val = 0
+                for s in sectors:
+                    if s["name"] == name:
+                        val = s["values"][240] if len(s["values"]) > 240 else 0
+                        break
+                values.append(val)
+            else:
+                values.append(0)
+        sector_data[name] = values
+    
+    # 计算每个行业的技术指标
+    analysis_results = []
+    
+    for name in all_sector_names:
+        values = sector_data[name]
+        if len(values) < 20:
+            continue
+        
+        # 取最近days天的数据用于分析
+        recent_values = values[-days:] if len(values) >= days else values
+        
+        # 1. 移动平均线
+        def calc_ma(data, period):
+            if len(data) < period:
+                return sum(data) / len(data) if data else 0
+            return sum(data[-period:]) / period
+        
+        ma5 = calc_ma(values, 5)
+        ma10 = calc_ma(values, 10)
+        ma20 = calc_ma(values, 20)
+        
+        # 2. 动量指标：短期(5日)均值 vs 长期(20日)均值的百分比变化
+        short_avg = calc_ma(values, 5)
+        long_avg = calc_ma(values, 20)
+        momentum = ((short_avg - long_avg) / abs(long_avg) * 100) if long_avg != 0 else 0
+        
+        # 3. 趋势强度（类似RSI）
+        # 计算上涨日和下跌日的比例
+        gains = []
+        losses = []
+        for i in range(1, len(recent_values)):
+            change = recent_values[i] - recent_values[i-1]
+            if change > 0:
+                gains.append(change)
+            else:
+                losses.append(abs(change))
+        
+        avg_gain = sum(gains) / len(gains) if gains else 0
+        avg_loss = sum(losses) / len(losses) if losses else 1
+        rs = avg_gain / avg_loss if avg_loss != 0 else 100
+        trend_strength = 100 - (100 / (1 + rs))  # 0-100，>50偏多，<50偏空
+        
+        # 4. 波动率（标准差）
+        mean_val = sum(recent_values) / len(recent_values)
+        variance = sum((x - mean_val) ** 2 for x in recent_values) / len(recent_values)
+        volatility = variance ** 0.5
+        
+        # 5. 累计净流入
+        total_inflow = sum(recent_values)
+        
+        # 6. 最近趋势（最近5天vs之前5天）
+        recent_5 = sum(values[-5:]) if len(values) >= 5 else sum(values)
+        prev_5 = sum(values[-10:-5]) if len(values) >= 10 else sum(values[:5])
+        recent_trend = recent_5 - prev_5
+        
+        # 7. MA排列信号
+        ma_bullish = ma5 > ma10 > ma20  # 多头排列
+        ma_bearish = ma5 < ma10 < ma20  # 空头排列
+        
+        # ===== 新增：长期趋势分析 =====
+        # 8. 长期趋势方向（使用全部可用数据，至少30天）
+        all_values = values  # 完整历史数据
+        long_term_avg = sum(all_values) / len(all_values) if all_values else 0
+        # 长期趋势：最近20日均值 vs 全部历史均值
+        recent_20_avg = calc_ma(values, 20)
+        long_trend_dir = recent_20_avg - long_term_avg  # 正值=高于长期均值，负值=低于
+        
+        # 9. 趋势斜率（线性回归斜率，反映趋势方向和速度）
+        n = len(recent_values)
+        if n >= 5:
+            x_mean = (n - 1) / 2.0
+            y_mean = sum(recent_values) / n
+            numerator = sum((i - x_mean) * (recent_values[i] - y_mean) for i in range(n))
+            denominator = sum((i - x_mean) ** 2 for i in range(n))
+            slope = numerator / denominator if denominator != 0 else 0
+        else:
+            slope = 0
+        
+        # 10. 资金流入一致性（正流入天数占比）
+        positive_days = sum(1 for v in recent_values if v > 0)
+        consistency = positive_days / len(recent_values) * 100 if recent_values else 50
+        
+        # 11. 趋势衰减/加速（后半段vs前半段）
+        half = len(recent_values) // 2
+        if half > 0:
+            first_half_avg = sum(recent_values[:half]) / half
+            second_half_avg = sum(recent_values[half:]) / (len(recent_values) - half)
+            trend_accel = second_half_avg - first_half_avg  # 正值=加速流入/减速流出
+        else:
+            trend_accel = 0
+        
+        # 12. 当前值相对历史分位（0-100，越高说明当前流入越多）
+        sorted_vals = sorted(all_values)
+        current_val = values[-1] if values else 0
+        percentile = 0
+        for i, v in enumerate(sorted_vals):
+            if v <= current_val:
+                percentile = (i + 1) / len(sorted_vals) * 100
+        
+        # ===== 综合评分（0-100）=====
+        score = 50  # 基础分
+        
+        # A. 短期动量贡献（-10 ~ +10）降低权重
+        score += max(-10, min(10, momentum * 1))
+        
+        # B. 趋势强度RSI贡献（-10 ~ +10）
+        score += (trend_strength - 50) * 0.2
+        
+        # C. MA排列贡献（-8 ~ +8）
+        if ma_bullish:
+            score += 8
+        elif ma_bearish:
+            score -= 8
+        
+        # D. 最近趋势贡献（-8 ~ +8）
+        if recent_trend > 0:
+            score += min(8, recent_trend / 10)
+        else:
+            score += max(-8, recent_trend / 10)
+        
+        # E. 长期趋势方向贡献（-15 ~ +15）★ 重要：长期下行行业大幅扣分
+        if long_term_avg < 0:
+            # 长期净流出行业（如房地产）：即使短期反弹也要扣分
+            score += max(-15, min(5, long_trend_dir * 1.5))
+        else:
+            # 长期净流入行业：正常评分
+            score += max(-10, min(15, long_trend_dir * 1.5))
+        
+        # F. 趋势斜率贡献（-10 ~ +10）★ 重要：持续下行趋势扣分
+        score += max(-10, min(10, slope * 5))
+        
+        # G. 资金流入一致性贡献（-8 ~ +8）
+        score += (consistency - 50) * 0.16
+        
+        # H. 趋势加速/减速贡献（-5 ~ +5）
+        score += max(-5, min(5, trend_accel * 3))
+        
+        # I. 累计净流入贡献（-3 ~ +3）降低权重
+        score += max(-3, min(3, total_inflow / 80))
+        
+        # J. 历史分位贡献（-3 ~ +3）
+        score += (percentile - 50) * 0.06
+        
+        # 限制在0-100范围
+        score = max(0, min(100, score))
+        
+        # 9. 生成信号
+        if score >= 70:
+            signal = "强烈买入"
+            signal_color = "#ff1744"  # 红色
+        elif score >= 60:
+            signal = "建议买入"
+            signal_color = "#ff5252"
+        elif score >= 45:
+            signal = "观望"
+            signal_color = "#ffc107"  # 黄色
+        elif score >= 35:
+            signal = "建议减仓"
+            signal_color = "#4caf50"  # 绿色
+        else:
+            signal = "建议卖出"
+            signal_color = "#00c853"
+        
+        analysis_results.append({
+            "name": name,
+            "ma5": round(ma5, 2),
+            "ma10": round(ma10, 2),
+            "ma20": round(ma20, 2),
+            "momentum": round(momentum, 2),
+            "trend_strength": round(trend_strength, 2),
+            "volatility": round(volatility, 2),
+            "total_inflow": round(total_inflow, 2),
+            "recent_trend": round(recent_trend, 2),
+            "ma_bullish": ma_bullish,
+            "ma_bearish": ma_bearish,
+            "long_term_avg": round(long_term_avg, 2),
+            "slope": round(slope, 3),
+            "consistency": round(consistency, 1),
+            "trend_accel": round(trend_accel, 2),
+            "percentile": round(percentile, 1),
+            "score": round(score, 1),
+            "signal": signal,
+            "signal_color": signal_color,
+            "recent_values": recent_values[-days:]  # 返回最近N天数据
+        })
+    
+    # 按评分排序
+    analysis_results.sort(key=lambda x: x["score"], reverse=True)
+    
+    return {
+        "analysis_date": today_date.strftime("%Y-%m-%d"),
+        "period_days": days,
+        "sectors": analysis_results,
+        "summary": {
+            "strong_buy": len([s for s in analysis_results if s["score"] >= 70]),
+            "buy": len([s for s in analysis_results if 60 <= s["score"] < 70]),
+            "hold": len([s for s in analysis_results if 45 <= s["score"] < 60]),
+            "sell": len([s for s in analysis_results if 35 <= s["score"] < 45]),
+            "strong_sell": len([s for s in analysis_results if s["score"] < 35])
+        }
+    }
+
 # ==================== 程序入口 ====================
 if __name__ == "__main__":              # 直接运行此文件时执行
     print("🚀 启动服务器...")            # 控制台提示
