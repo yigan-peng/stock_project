@@ -25,6 +25,14 @@ DB_INTRADAY = "fund_flow_intraday.db"   # 分时数据数据库文件名（存�
 STATIC_DIR = "static"                   # 前端静态文件目录（存放index.html）
 TOP_N = 90                              # 展示的行业数量（取净流入排名前20的行业）
 
+# ==================== 个股追踪配置（修改此处增减股票，code为空则跳过） ====================
+STOCK_LIST = [
+    {"code": "600276", "name": "恒瑞医疗", "market": "sh"},
+]
+STOCK_INTERVAL = 2                      # 每只股票采集间隔秒数（防触发限制）
+DB_STOCK_INTRADAY = "stock_intraday.db" # 个股分时数据库文件名
+DB_STOCK_DAILY = "stock_daily.db"       # 个股每日数据库文件名
+
 
 # ==================== 分时时间轴生成 ====================
 def _get_intraday_time_points():
@@ -81,6 +89,10 @@ _collection_idx = 0                     # 当前正在采集第几个点（0~N�
 _collection_active = False              # 采集是否正在进行中的标志
 _collection_total = 241                 # 本次采集的总点数
 _collection_lock = threading.Lock()     # 线程锁：保护全局变量的并发访问
+
+# ==================== 个股采集状态变量 ====================
+_stock_names = {}                       # {股票代码: 股票名称} 如 {"000001": "平安银行"}
+_stock_values = {}                      # {股票代码: [241个数值]} 存放所有个股的所有分时数据
 
 # ==================== 数据库操作函数 ====================
 def get_db(path):
@@ -168,6 +180,69 @@ def load_intraday():
             "sectors": json.loads(row["sectors"])
         }
     return None                         # 无当天数据返回None
+
+# ==================== 个股数据库操作 ====================
+def init_stock_db():
+    """初始化个股分时和每日数据库"""
+    conn = get_db(DB_STOCK_INTRADAY)
+    conn.execute("""CREATE TABLE IF NOT EXISTS stock_intraday (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL UNIQUE,
+        time_points TEXT NOT NULL, stocks TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    conn.commit(); conn.close()
+
+    conn = get_db(DB_STOCK_DAILY)
+    conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL UNIQUE,
+        time_points TEXT NOT NULL, stocks TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    conn.commit(); conn.close()
+
+def save_stock_intraday(date_str, time_points, stocks):
+    """保存个股分时数据"""
+    conn = get_db(DB_STOCK_INTRADAY)
+    conn.execute("DELETE FROM stock_intraday WHERE date = ?", (date_str,))
+    conn.execute("INSERT INTO stock_intraday (date, time_points, stocks) VALUES (?, ?, ?)",
+        (date_str, json.dumps(time_points, ensure_ascii=False), json.dumps(stocks, ensure_ascii=False)))
+    conn.commit(); conn.close()
+
+def load_stock_intraday():
+    """加载当天个股分时数据"""
+    conn = get_db(DB_STOCK_INTRADAY)
+    today = datetime.now().strftime("%Y-%m-%d")
+    row = conn.execute(
+        "SELECT date, time_points, stocks FROM stock_intraday WHERE date = ?", (today,)
+    ).fetchone()
+    conn.close()
+    if row:
+        return {"date": row["date"], "time_points": json.loads(row["time_points"]), "stocks": json.loads(row["stocks"])}
+    return None
+
+def _fetch_stock_snapshot():
+    """
+    获取STOCK_LIST中所有有效个股的当天资金净流入（东方财富数据源）
+    返回: [{"code":"000001","name":"平安银行","value":1.23}, ...] 按STOCK_LIST顺序
+    code为空的条目会被跳过，但保留位置（value=0）
+    """
+    results = []
+    for stock in STOCK_LIST:
+        if not stock["code"]:           # code为空跳过
+            results.append({"code": "", "name": "", "value": 0})
+            continue
+        try:
+            df = ak.stock_individual_fund_flow(stock=stock["code"], market=stock["market"])
+            if df is not None and not df.empty:
+                last_row = df.iloc[-1]  # 取最后一行（最近一天）
+                val = float(last_row["主力净流入-净额"])
+                results.append({"code": stock["code"], "name": stock["name"], "value": round(val, 2)})
+            else:
+                results.append({"code": stock["code"], "name": stock["name"], "value": 0})
+        except Exception as e:
+            print(f"⚠️ 获取{stock['name']}({stock['code']})失败: {e}")
+            results.append({"code": stock["code"], "name": stock["name"], "value": 0})
+        time.sleep(STOCK_INTERVAL)      # 间隔防触发限制
+    return results
+
 # ==================== 同花顺数据获取（核心数据源） ====================
 def _get_v_code():
     """
@@ -460,7 +535,33 @@ def _collection_worker():
                 # 每次采集后立即保存到数据库（防止程序崩溃丢失数据）
                 sectors = [{"name": n, "values": name_values[n]} for n in all_names]  # 构建行业数据
                 save_intraday(today, time_points, sectors)  # 保存到分时数据库
-                print(f"💾 已保存到数据库")
+                print(f"💾 行业数据已保存到数据库")
+
+                # ---- 个股数据采集（东方财富数据源） ----
+                if STOCK_LIST:          # 如果有配置个股
+                    print(f"📈 开始采集{len([s for s in STOCK_LIST if s['code']])}只个股数据...")
+                    stock_snapshot = _fetch_stock_snapshot()  # 逐只获取，每只间隔2秒
+                    if stock_snapshot:
+                        # 首次采集时初始化个股数据结构
+                        if not _stock_names:
+                            for s in STOCK_LIST:
+                                if s["code"]:  # 只初始化有效股票
+                                    _stock_names[s["code"]] = s["name"]
+                                    _stock_values[s["code"]] = [0.0] * 241
+
+                        # 将本次采集的数据填入对应位置（按STOCK_LIST顺序）
+                        for i, s in enumerate(STOCK_LIST):
+                            if s["code"] and i < len(stock_snapshot):
+                                _stock_values[s["code"]][_collection_idx] = stock_snapshot[i]["value"]
+
+                        # 保存个股分时数据到数据库
+                        stock_sectors = [{"code": s["code"], "name": s["name"], "values": _stock_values[s["code"]]}
+                                         for s in STOCK_LIST if s["code"]]
+                        save_stock_intraday(today, time_points, stock_sectors)
+                        stock_top3 = sorted([(s["name"], s["value"]) for s in stock_snapshot if s["code"]],
+                                           key=lambda x: x[1], reverse=True)[:3]
+                        stock_top3_str = ", ".join(f"{n}({v:+.1f})" for n, v in stock_top3)
+                        print(f"💾 个股数据已保存 | TOP3: {stock_top3_str}")
             else:
                 print(f"❌ 获取失败: [{_collection_idx+1}/{_collection_total}] 标签:{label_time} 实际:{actual_time} [{trading_tag}] API返回空")
     
@@ -690,7 +791,8 @@ async def _check_collection_alive():
                     print(f"❌ 采集线程重启失败: {msg}")
 
 async def lifespan(app: FastAPI):
-    init_db()                           # 初始化数据库（创建表）
+    init_db()                           # 初始化行业数据库（创建表）
+    init_stock_db()                     # 初始化个股数据库（创建表）
     # 启动时自动开始分时采集
     ok, msg = start_collection()
     if ok:
@@ -1313,6 +1415,187 @@ async def trend_analysis(days: int = 30):
             "strong_sell": len([s for s in analysis_results if s["score"] < 35])
         }
     }
+
+# ==================== 个股API接口 ====================
+@app.get("/api/stock/intraday")
+async def stock_intraday():
+    """获取当天个股分时数据"""
+    d = load_stock_intraday()
+    if d:
+        return d
+    # 无数据时返回空结构
+    stocks = [{"code": s["code"], "name": s["name"], "values": [0.0] * 241}
+              for s in STOCK_LIST if s["code"]]
+    return {"date": datetime.now().strftime("%Y-%m-%d"), "time_points": INTRADAY_POINTS, "stocks": stocks}
+
+@app.get("/api/stock/daily/{days}")
+async def stock_daily_history(days: int = 30):
+    """获取个股每日历史数据"""
+    conn = get_db(DB_STOCK_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, stocks FROM stock_daily ORDER BY date ASC"
+    ).fetchall()
+    conn.close()
+
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "stocks": json.loads(row["stocks"])
+        })
+
+    today_date = datetime.now().date()
+    dates = []
+    for i in range(days - 1, -1, -1):
+        d = today_date - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+
+    record_by_date = {rec["date"]: rec for rec in records}
+
+    # 用STOCK_LIST中的有效股票作为基准
+    stocks_list = []
+    for s in STOCK_LIST:
+        if not s["code"]:
+            continue
+        values = []
+        for date_str in dates:
+            if date_str in record_by_date:
+                rec = record_by_date[date_str]
+                val = 0
+                for st in rec["stocks"]:
+                    if st["code"] == s["code"]:
+                        val = st["values"][240] if len(st["values"]) > 240 else 0
+                        break
+                values.append(val)
+            else:
+                values.append(0)
+        stocks_list.append({"code": s["code"], "name": s["name"], "values": values})
+
+    deleted_dates = [d for d in dates if d not in record_by_date]
+    return {
+        "date": dates[-1] if dates else "",
+        "time_points": dates,
+        "stocks": stocks_list,
+        "deleted_dates": deleted_dates,
+        "days": days
+    }
+
+@app.post("/api/stock/merge_intraday")
+async def stock_merge_intraday():
+    """将个股分时数据合并到每日数据库"""
+    try:
+        result, err = do_merge_stock_intraday_to_daily()
+        if err:
+            return JSONResponse(status_code=400, content={"error": err})
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+def do_merge_stock_intraday_to_daily():
+    """将个股分时数据合并到个股每日数据库"""
+    intraday = load_stock_intraday()
+    if not intraday or not intraday.get("stocks"):
+        return None, "无个股分时数据可合并"
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    conn = get_db(DB_STOCK_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, stocks FROM stock_daily ORDER BY date ASC"
+    ).fetchall()
+
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "stocks": json.loads(row["stocks"])
+        })
+
+    found = False
+    for rec in records:
+        if rec["date"] == today:
+            rec["time_points"] = intraday["time_points"]
+            rec["stocks"] = intraday["stocks"]
+            found = True
+            break
+
+    if not found:
+        records.append({
+            "date": today,
+            "time_points": intraday["time_points"],
+            "stocks": intraday["stocks"]
+        })
+
+    MAX_DAYS = 1080
+    while len(records) > MAX_DAYS:
+        removed = records.pop(0)
+        print(f"🗑️ 删除过期个股数据: {removed['date']}")
+
+    conn.execute("DELETE FROM stock_daily")
+    for rec in records:
+        conn.execute(
+            "INSERT INTO stock_daily (date, time_points, stocks) VALUES (?, ?, ?)",
+            (rec["date"],
+             json.dumps(rec["time_points"], ensure_ascii=False),
+             json.dumps(rec["stocks"], ensure_ascii=False))
+        )
+    conn.commit()
+    conn.close()
+
+    # 构造返回数据
+    conn = get_db(DB_STOCK_DAILY)
+    rows = conn.execute(
+        "SELECT date, time_points, stocks FROM stock_daily ORDER BY date ASC"
+    ).fetchall()
+    conn.close()
+
+    records = []
+    for row in rows:
+        records.append({
+            "date": row["date"],
+            "time_points": json.loads(row["time_points"]),
+            "stocks": json.loads(row["stocks"])
+        })
+
+    today_date = datetime.now().date()
+    dates = []
+    for i in range(29, -1, -1):
+        d = today_date - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+
+    record_by_date = {rec["date"]: rec for rec in records}
+
+    stocks_list = []
+    for s in STOCK_LIST:
+        if not s["code"]:
+            continue
+        values = []
+        for date_str in dates:
+            if date_str in record_by_date:
+                rec = record_by_date[date_str]
+                val = 0
+                for st in rec["stocks"]:
+                    if st["code"] == s["code"]:
+                        val = st["values"][240] if len(st["values"]) > 240 else 0
+                        break
+                values.append(val)
+            else:
+                values.append(0)
+        stocks_list.append({"code": s["code"], "name": s["name"], "values": values})
+
+    deleted_dates = [d for d in dates if d not in record_by_date]
+
+    result = {
+        "date": dates[-1],
+        "time_points": dates,
+        "stocks": stocks_list,
+        "deleted_dates": deleted_dates
+    }
+
+    print(f"✅ 个股分时数据已合并到每日: {len(intraday['stocks'])} 只股票 × 241个时间点 | 共{len(records)}天数据")
+    return result, None
 
 # ==================== 程序入口 ====================
 if __name__ == "__main__":              # 直接运行此文件时执行

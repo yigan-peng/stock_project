@@ -79,10 +79,12 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 </div>
 <!-- ===== Tab切换栏 ===== -->
 <div class="tabs">
-  <div class="tab active" onclick="switchTab('daily')">📈 每日净流入</div>   <!-- Tab1：每日图表 -->
-  <div class="tab" onclick="switchTab('intraday')">📉 当天分时</div>         <!-- Tab2：分时图表 -->
-  <div class="tab" onclick="switchTab('heatmap')">📊 资金热力图</div>        <!-- Tab3：热力图 -->
-  <div class="tab" onclick="switchTab('trend')">🔮 趋势分析</div>            <!-- Tab4：趋势分析 -->
+  <div class="tab active" onclick="switchTab('daily')">📈 每日净流入</div>
+  <div class="tab" onclick="switchTab('intraday')">📉 当天分时</div>
+  <div class="tab" onclick="switchTab('stockIntraday')">📊 个股分时</div>
+  <div class="tab" onclick="switchTab('stockDaily')">📉 个股每日</div>
+  <div class="tab" onclick="switchTab('heatmap')">📊 资金热力图</div>
+  <div class="tab" onclick="switchTab('trend')">🔮 趋势分析</div>
 </div>
 <!-- ===== 图表1：每日净流入 ===== -->
 <div class="chart-wrap active" id="dailyWrap">
@@ -110,7 +112,29 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   </label>
   <div id="chartIntraday" style="width:100%;height:100%"></div>
 </div>
-<!-- ===== 图表3：资金热力图 ===== -->
+<!-- ===== 图表3：个股分时 ===== -->
+<div class="chart-wrap" id="stockIntradayWrap">
+  <div class="chart-title">个股分时净流入(亿元)</div>
+  <label style="position:absolute;top:4px;right:80px;z-index:2;color:#8b949e;font-size:11px;cursor:pointer">
+    <input type="checkbox" id="selectAllStockIntraday" checked> 全选
+  </label>
+  <div id="chartStockIntraday" style="width:100%;height:100%"></div>
+</div>
+<!-- ===== 图表4：个股每日 ===== -->
+<div class="chart-wrap" id="stockDailyWrap">
+  <div class="chart-title" id="stockDailyChartTitle">个股每日净流入(亿元) · 近1个月</div>
+  <div id="stockDailyRangeBtnWrap" style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);z-index:10;display:flex;gap:6px;background:#161b22;padding:6px 12px;border-radius:6px;border:1px solid #30363d;">
+    <button class="range-btn active" data-stock-days="30">近1月</button>
+    <button class="range-btn" data-stock-days="60">近2月</button>
+    <button class="range-btn" data-stock-days="90">近3月</button>
+    <button class="range-btn" data-stock-days="180">近半年</button>
+  </div>
+  <label style="position:absolute;top:4px;right:80px;z-index:2;color:#8b949e;font-size:11px;cursor:pointer">
+    <input type="checkbox" id="selectAllStockDaily" checked> 全选
+  </label>
+  <div id="chartStockDaily" style="width:100%;height:100%"></div>
+</div>
+<!-- ===== 图表5：资金热力图 ===== -->
 <div class="chart-wrap" id="heatmapWrap">
   <div class="chart-title" id="heatmapChartTitle">资金热力图(亿元) · 近1个月</div>
   <!-- 时间范围选择按钮组 -->
