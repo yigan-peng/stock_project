@@ -28,6 +28,8 @@ TOP_N = 90                              # 展示的行业数量（取净流入�
 # ==================== 个股追踪配置（修改此处增减股票，code为空则跳过） ====================
 STOCK_LIST = [
     {"code": "600276", "name": "恒瑞医疗", "market": "sh"},
+    {"code": "000651", "name": "格力电器", "market": "sz"},
+    {"code": "000568", "name": "泸州老窖", "market": "sz"},
 ]
 STOCK_INTERVAL = 2                      # 每只股票采集间隔秒数（防触发限制）
 DB_STOCK_INTRADAY = "stock_intraday.db" # 个股分时数据库文件名
@@ -218,9 +220,29 @@ def load_stock_intraday():
         return {"date": row["date"], "time_points": json.loads(row["time_points"]), "stocks": json.loads(row["stocks"])}
     return None
 
+# 全局复用的Session，避免每次请求都新建连接（减少被服务器断连的概率）
+_stock_session = None
+
+def _get_stock_session():
+    """获取或创建一个带完整浏览器请求头的requests.Session"""
+    global _stock_session
+    if _stock_session is None:
+        _stock_session = requests.Session()
+        _stock_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Referer": "https://data.eastmoney.com/",
+            "Origin": "https://data.eastmoney.com",
+        })
+    return _stock_session
+
 def _fetch_stock_snapshot():
     """
     获取STOCK_LIST中所有有效个股的当天资金净流入（东方财富数据源）
+    注意：必须用 HTTP（不是HTTPS），HTTPS会被服务器断连
     返回: [{"code":"000001","name":"平安银行","value":1.23}, ...] 按STOCK_LIST顺序
     code为空的条目会被跳过，但保留位置（value=0）
     """
@@ -230,10 +252,31 @@ def _fetch_stock_snapshot():
             results.append({"code": "", "name": "", "value": 0})
             continue
         try:
-            df = ak.stock_individual_fund_flow(stock=stock["code"], market=stock["market"])
-            if df is not None and not df.empty:
-                last_row = df.iloc[-1]  # 取最后一行（最近一天）
-                val = float(last_row["主力净流入-净额"])
+            # 东方财富secid格式：1.600276(沪市) 或 0.000651(深市)
+            secid_prefix = "1" if stock["market"] == "sh" else "0"
+            secid = f"{secid_prefix}.{stock['code']}"
+            # 必须用 HTTP（HTTPS会被断连）
+            url = "http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+            params = {
+                "lmt": "1",            # 只取最近1天
+                "klt": "101",          # 日K线
+                "secid": secid,
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "ut": "b2884a393a59ad64002292a3e90d46a5",
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://data.eastmoney.com/",
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            data = resp.json()
+            if data and data.get("data") and data["data"].get("klines"):
+                # klines格式: "2026-09-14,-26533056.0,-4891456.0,31424528.0,..."
+                last_line = data["data"]["klines"][-1]
+                parts = last_line.split(",")
+                # parts[1] = 主力净流入净额（单位：元）
+                val = float(parts[1]) / 100000000  # 元 → 亿元
                 results.append({"code": stock["code"], "name": stock["name"], "value": round(val, 2)})
             else:
                 results.append({"code": stock["code"], "name": stock["name"], "value": 0})
