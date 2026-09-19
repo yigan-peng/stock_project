@@ -1524,6 +1524,63 @@ async def stock_daily_history(days: int = 30):
         "days": days
     }
 
+@app.post("/api/stock/refresh")
+async def stock_refresh():
+    """手动刷新个股分时数据：立即获取一次个股快照并保存到数据库"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now()
+    current_hm = f"{now.hour:02d}:{now.minute:02d}"
+
+    print(f"📈 手动刷新个股数据...")
+    stock_snapshot = _fetch_stock_snapshot()
+    if not stock_snapshot or all(s["value"] == 0 for s in stock_snapshot):
+        return {"error": "个股API返回空数据，请检查网络或稍后重试"}
+
+    # 加载已有的分时数据
+    existing = load_stock_intraday()
+    if existing and existing["date"] == today and existing.get("stocks"):
+        tp = existing["time_points"]
+        # 更新最后一个动态点
+        last_tp = tp[-1] if tp else ""
+        is_fixed = last_tp in INTRADAY_POINTS
+        if is_fixed:
+            tp.append(current_hm)
+            for s in existing["stocks"]:
+                s["values"].append(0.0)
+            idx = len(tp) - 1
+            if len(tp) > 241:
+                for s in existing["stocks"]:
+                    s["values"][240] = next((ss["value"] for ss in stock_snapshot if ss["code"] == s["code"]), 0)
+        else:
+            tp[-1] = current_hm
+            idx = len(tp) - 1
+            if len(tp) > 241:
+                for s in existing["stocks"]:
+                    s["values"][240] = next((ss["value"] for ss in stock_snapshot if ss["code"] == s["code"]), 0)
+        for s in existing["stocks"]:
+            s["values"][idx] = next((ss["value"] for ss in stock_snapshot if ss["code"] == s["code"]), 0)
+        save_stock_intraday(today, tp, existing["stocks"])
+        stocks_data = existing["stocks"]
+    else:
+        # 首次创建
+        time_points = list(INTRADAY_POINTS)
+        stocks_data = []
+        for s in STOCK_LIST:
+            if not s["code"]:
+                continue
+            values = [0.0] * 241
+            val = next((ss["value"] for ss in stock_snapshot if ss["code"] == s["code"]), 0)
+            values[240] = val  # 填入15:00点
+            stocks_data.append({"code": s["code"], "name": s["name"], "values": values})
+        save_stock_intraday(today, time_points, stocks_data)
+
+    top3 = sorted([(s["name"], s["value"]) for s in stock_snapshot if s["code"]],
+                   key=lambda x: x[1], reverse=True)[:3]
+    top3_str = ", ".join(f"{n}({v:+.2f})" for n, v in top3)
+    print(f"✅ 个股数据已刷新 | TOP3: {top3_str}")
+
+    return {"date": today, "time_points": INTRADAY_POINTS, "stocks": stocks_data}
+
 @app.post("/api/stock/merge_intraday")
 async def stock_merge_intraday():
     """将个股分时数据合并到每日数据库"""

@@ -73,9 +73,13 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   <!-- 按钮3：将分时数据合并到每日（绿色） -->
   <button id="btnMerge" class="btn-green" onclick="doMergeIntraday()">🔀 将分时数据更新到每日</button>
   <div class="sep"></div>               <!-- 竖线分隔 -->
+  <!-- 按钮4：刷新个股数据（蓝色） -->
+  <button id="btnRefreshStock" class="btn-blue" onclick="doRefreshStock()">📈 刷新个股数据</button>
+  <div class="sep"></div>               <!-- 竖线分隔 -->
   <!-- 状态显示文字 -->
   <span class="st" id="stDaily">每日: 加载中…</span>     <!-- 每日数据状态 -->
   <span class="st" id="stIntraday">分时: 加载中…</span>  <!-- 分时数据状态 -->
+  <span class="st" id="stStock">个股: 未加载</span>      <!-- 个股数据状态 -->
 </div>
 <!-- ===== Tab切换栏 ===== -->
 <div class="tabs">
@@ -175,6 +179,8 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 const chartDaily = echarts.init(document.getElementById('chartDaily'));      // 每日图表
 const chartIntraday = echarts.init(document.getElementById('chartIntraday')); // 分时图表
 const chartHeatmap = echarts.init(document.getElementById('chartHeatmap'));  // 热力图图表
+const chartStockIntraday = echarts.init(document.getElementById('chartStockIntraday')); // 个股分时图表
+const chartStockDaily = echarts.init(document.getElementById('chartStockDaily'));       // 个股每日图表
 
 // ==================== 获取DOM元素引用 ====================
 const stDaily = document.getElementById('stDaily');       // 每日状态文字元素
@@ -198,25 +204,21 @@ const Y_MAX = 430;   // Y轴上限
 
 // ==================== Tab切换逻辑 ====================
 /**
- * 切换每日/分时/热力图/趋势分析图表页面
- * name: 'daily' 或 'intraday' 或 'heatmap' 或 'trend'
+ * 切换每日/分时/个股分时/个股每日/热力图/趋势分析图表页面
+ * name: 'daily' 或 'intraday' 或 'stockIntraday' 或 'stockDaily' 或 'heatmap' 或 'trend'
  */
 function switchTab(name) {
   // 更新Tab按钮样式
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));  // 移除所有active
   const tabs = document.querySelectorAll('.tab');  // 获取所有tab
-  if (name === 'daily') tabs[0].classList.add('active');   // 激活第一个tab
-  else if (name === 'intraday') tabs[1].classList.add('active');  // 激活第二个tab
-  else if (name === 'heatmap') tabs[2].classList.add('active');   // 激活第三个tab
-  else if (name === 'trend') tabs[3].classList.add('active');     // 激活第四个tab
+  const tabMap = {daily:0, intraday:1, stockIntraday:2, stockDaily:3, heatmap:4, trend:5};
+  if (tabMap[name] !== undefined) tabs[tabMap[name]].classList.add('active');
   // 更新图表容器显示
   document.querySelectorAll('.chart-wrap').forEach(w => w.classList.remove('active'));  // 隐藏所有图表
-  if (name === 'daily') document.getElementById('dailyWrap').classList.add('active');
-  else if (name === 'intraday') document.getElementById('intradayWrap').classList.add('active');
-  else if (name === 'heatmap') document.getElementById('heatmapWrap').classList.add('active');
-  else if (name === 'trend') document.getElementById('trendWrap').classList.add('active');
+  const wrapMap = {daily:'dailyWrap', intraday:'intradayWrap', stockIntraday:'stockIntradayWrap', stockDaily:'stockDailyWrap', heatmap:'heatmapWrap', trend:'trendWrap'};
+  if (wrapMap[name]) document.getElementById(wrapMap[name]).classList.add('active');
   // 切换后需要resize图表（ECharts需要重新计算尺寸）
-  setTimeout(() => { chartDaily.resize(); chartIntraday.resize(); chartHeatmap.resize(); }, 50);
+  setTimeout(() => { chartDaily.resize(); chartIntraday.resize(); chartHeatmap.resize(); chartStockIntraday.resize(); chartStockDaily.resize(); }, 50);
   // 切换到热力图时自动加载数据
   if (name === 'heatmap' && !heatmapLoaded) {
     loadHeatmapData(currentHeatmapDays);
@@ -224,6 +226,13 @@ function switchTab(name) {
   // 切换到趋势分析时自动加载数据
   if (name === 'trend' && !trendLoaded) {
     loadTrendData(currentTrendDays);
+  }
+  // 切换到个股分时/每日时自动加载数据
+  if (name === 'stockIntraday' && !stockIntradayLoaded) {
+    loadStockIntradayData();
+  }
+  if (name === 'stockDaily' && !stockDailyLoaded) {
+    loadStockDailyData(currentStockDays);
   }
 }
 
@@ -884,6 +893,153 @@ document.querySelectorAll('[data-trend-days]').forEach(btn => {
     loadTrendData(days);
   });
 });
+
+// ==================== 个股分时相关变量 ====================
+let stockIntradayLoaded = false;  // 是否已加载过个股分时数据
+
+// ==================== 个股图表配置生成（stocks字段） ====================
+function makeStockOption(res, yName) {
+  if (!res || res.error || !res.stocks || res.stocks.length === 0) return null;
+  return {
+    backgroundColor: '#0d1117',
+    tooltip: {trigger:'axis', backgroundColor:'#1c2333', borderColor:'#30363d',
+              textStyle:{color:'#c9d1d9',fontSize:11},
+              enterable:true,
+              confine:true,
+              formatter: function(params) {
+                if (!params || params.length === 0) return '';
+                var title = '<b style="color:#58a6ff">' + params[0].axisValue + '</b><br>';
+                var items = params.map(function(p) {
+                  var val = Array.isArray(p.value) ? p.value[1] : p.value;
+                  var sign = val > 0 ? '+' : '';
+                  return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + p.color + ';margin-right:4px;vertical-align:middle"></span>' +
+                    p.seriesName + ': ' + sign + Number(val).toFixed(2) + '<br>';
+                }).join('');
+                return '<div style="max-height:180px;overflow-y:auto;">' + title + items + '</div>';
+              }},
+    legend: {data: res.stocks.map(s => s.name), textStyle:{color:'#8b949e',fontSize:10,fixed:true},
+             top:68, right:8, width:'15%', type:'plain',
+             icon:'circle', itemWidth:8, itemHeight:8, itemGap:4,
+             formatter: function(name) {
+               var s = name.length > 8 ? name.substring(0,8) : name;
+               while (s.length < 8) s += '\u3000';
+               return s;
+             }},
+    grid: {left:'16px',right:'20%',bottom:'16px',top:68,containLabel:true},
+    xAxis: {type:'category', data:res.time_points,
+            axisLine:{lineStyle:{color:'#30363d'}}, axisLabel:{color:'#8b949e',fontSize:10}},
+    yAxis: {type:'value', name:yName,
+            nameTextStyle:{color:'#8b949e',fontSize:10},
+            axisLine:{lineStyle:{color:'#30363d'}}, axisLabel:{color:'#8b949e',fontSize:10},
+            splitLine:{lineStyle:{color:'#21262d'}}},
+    series: res.stocks.map((s,i) => ({
+      name: s.name,
+      type:'line',
+      smooth:true,
+      symbol:'circle',
+      symbolSize:4,
+      lineStyle:{width:1.5,color:C[i%C.length]},
+      itemStyle:{color:C[i%C.length]},
+      connectNulls: true,
+      data: s.values.map((v,t) => [res.time_points[t], v])
+    }))
+  };
+}
+
+// ==================== 加载个股分时数据 ====================
+function loadStockIntradayData() {
+  document.getElementById('stStock').textContent = '个股: 加载中...';
+  fetch('/api/stock/intraday')
+    .then(r => r.json())
+    .then(j => {
+      stockIntradayLoaded = true;
+      const opt = makeStockOption(j, '净流入(亿元)');
+      if (opt) {
+        chartStockIntraday.setOption(opt, true);
+        bindSelectAll(chartStockIntraday, 'selectAllStockIntraday');
+        // 统计有效数据点数
+        const filled = j.stocks && j.stocks.length > 0
+          ? j.stocks[0].values.filter(v => v !== 0).length : 0;
+        document.getElementById('stStock').textContent = '个股: ' + (j.stocks ? j.stocks.length : 0) + '只 (' + filled + '点)';
+      } else {
+        document.getElementById('stStock').textContent = '个股: 暂无数据';
+      }
+    })
+    .catch(e => {
+      document.getElementById('stStock').textContent = '个股: 加载失败';
+      console.error('个股分时加载失败:', e);
+    });
+}
+
+// ==================== 手动刷新个股数据 ====================
+function doRefreshStock() {
+  const btn = document.getElementById('btnRefreshStock');
+  btn.disabled = true;
+  document.getElementById('stStock').textContent = '个股: 刷新中...';
+  fetch('/api/stock/refresh', {method:'POST'})
+    .then(r => r.json())
+    .then(j => {
+      if (j.error) {
+        document.getElementById('stStock').textContent = '个股: ' + j.error;
+        return;
+      }
+      stockIntradayLoaded = true;
+      const opt = makeStockOption(j, '净流入(亿元)');
+      if (opt) {
+        chartStockIntraday.setOption(opt, true);
+        bindSelectAll(chartStockIntraday, 'selectAllStockIntraday');
+        const filled = j.stocks && j.stocks.length > 0
+          ? j.stocks[0].values.filter(v => v !== 0).length : 0;
+        document.getElementById('stStock').textContent = '个股: 已刷新 (' + j.stocks.length + '只, ' + filled + '点)';
+      }
+      // 自动切换到个股分时Tab
+      switchTab('stockIntraday');
+    })
+    .catch(e => {
+      document.getElementById('stStock').textContent = '个股: 刷新失败';
+      console.error('个股刷新失败:', e);
+    })
+    .finally(() => btn.disabled = false);
+}
+
+// ==================== 个股每日相关变量 ====================
+let stockDailyLoaded = false;   // 是否已加载过个股每日数据
+let currentStockDays = 30;      // 当前个股每日时间范围
+
+// ==================== 加载个股每日数据 ====================
+function loadStockDailyData(days) {
+  currentStockDays = days;
+  document.getElementById('stockDailyChartTitle').textContent = '个股每日净流入(亿元) · 加载中...';
+  fetch(`/api/stock/daily/${days}`)
+    .then(r => r.json())
+    .then(j => {
+      stockDailyLoaded = true;
+      const opt = makeStockOption(j, '净流入(亿元)');
+      if (opt) {
+        chartStockDaily.setOption(opt, true);
+        bindSelectAll(chartStockDaily, 'selectAllStockDaily');
+      }
+      const titleMap = {30:'近1个月',60:'近2个月',90:'近3个月',180:'近半年'};
+      document.getElementById('stockDailyChartTitle').textContent = '个股每日净流入(亿元) · ' + (titleMap[days] || days+'天');
+    })
+    .catch(e => {
+      document.getElementById('stockDailyChartTitle').textContent = '个股每日: 加载失败';
+      console.error('个股每日加载失败:', e);
+    });
+}
+
+// ==================== 个股每日时间范围按钮事件 ====================
+document.querySelectorAll('[data-stock-days]').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('[data-stock-days]').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    const days = parseInt(this.dataset.stockDays);
+    loadStockDailyData(days);
+  });
+});
+
+// ==================== 窗口resize时也resize个股图表 ====================
+window.addEventListener('resize', () => { chartStockIntraday.resize(); chartStockDaily.resize(); });
      
 </script>
 </body>
