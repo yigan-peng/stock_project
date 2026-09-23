@@ -75,6 +75,8 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   <div class="sep"></div>               <!-- 竖线分隔 -->
   <!-- 按钮4：刷新个股数据（蓝色） -->
   <button id="btnRefreshStock" class="btn-blue" onclick="doRefreshStock()">📈 刷新个股数据</button>
+  <!-- 按钮5：将个股分时数据合并到每日（绿色） -->
+  <button id="btnMergeStock" class="btn-green" onclick="doMergeStockIntraday()">🔀 将个股分时更新到每日</button>
   <div class="sep"></div>               <!-- 竖线分隔 -->
   <!-- 状态显示文字 -->
   <span class="st" id="stDaily">每日: 加载中…</span>     <!-- 每日数据状态 -->
@@ -1000,6 +1002,33 @@ function doRefreshStock() {
       console.error('个股刷新失败:', e);
     })
     .finally(() => btn.disabled = false);
+}
+
+// ==================== 将个股分时数据合并到每日 ====================
+function doMergeStockIntraday() {
+  const btn = document.getElementById('btnMergeStock');
+  btn.disabled = true;
+  btn.textContent = '⏳ 合并中...';
+  document.getElementById('stStock').textContent = '个股: 合并中...';
+  fetch('/api/stock/merge_intraday', {method:'POST'})
+    .then(r => r.json())
+    .then(j => {
+      btn.disabled = false;
+      btn.textContent = '🔀 将个股分时更新到每日';
+      if (j.error) {
+        document.getElementById('stStock').textContent = '个股: ' + j.error;
+        return;
+      }
+      document.getElementById('stStock').textContent = '个股: 已合并到每日';
+      // 如果当前在个股每日Tab，立即刷新图表
+      loadStockDailyData(currentStockDays);
+    })
+    .catch(e => {
+      btn.disabled = false;
+      btn.textContent = '🔀 将个股分时更新到每日';
+      document.getElementById('stStock').textContent = '个股: 合并失败';
+      console.error('个股合并失败:', e);
+    });
 }
 
 // ==================== 个股每日相关变量 ====================

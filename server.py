@@ -241,8 +241,9 @@ def _get_stock_session():
 
 def _fetch_stock_snapshot():
     """
-    获取STOCK_LIST中所有有效个股的当天资金净流入（东方财富数据源）
-    注意：必须用 HTTP（不是HTTPS），HTTPS会被服务器断连
+    获取STOCK_LIST中所有有效个股的当天资金净流入（东方财富单股明细接口，akshare封装）
+    每只股票独立请求 1 次（共 len(STOCK_LIST) 次），每次间隔 STOCK_INTERVAL 秒防触发限制
+    不再使用同花顺整榜接口 stock_fund_flow_individual（内部分页 105 次请求，易触发限制）
     返回: [{"code":"000001","name":"平安银行","value":1.23}, ...] 按STOCK_LIST顺序
     code为空的条目会被跳过，但保留位置（value=0）
     """
@@ -252,38 +253,21 @@ def _fetch_stock_snapshot():
             results.append({"code": "", "name": "", "value": 0})
             continue
         try:
-            # 东方财富secid格式：1.600276(沪市) 或 0.000651(深市)
-            secid_prefix = "1" if stock["market"] == "sh" else "0"
-            secid = f"{secid_prefix}.{stock['code']}"
-            # 必须用 HTTP（HTTPS会被断连）
-            url = "http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-            params = {
-                "lmt": "1",            # 只取最近1天
-                "klt": "101",          # 日K线
-                "secid": secid,
-                "fields1": "f1,f2,f3,f7",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                "ut": "b2884a393a59ad64002292a3e90d46a5",
-            }
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://data.eastmoney.com/",
-            }
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
-            if data and data.get("data") and data["data"].get("klines"):
-                # klines格式: "2026-09-14,-26533056.0,-4891456.0,31424528.0,..."
-                last_line = data["data"]["klines"][-1]
-                parts = last_line.split(",")
-                # parts[1] = 主力净流入净额（单位：元）
-                val = float(parts[1]) / 100000000  # 元 → 亿元
-                results.append({"code": stock["code"], "name": stock["name"], "value": round(val, 2)})
+            df = ak.stock_individual_fund_flow(stock=stock["code"], market=stock["market"])
+            if df is not None and not df.empty:
+                last_row = df.iloc[-1]  # 最新一行：盘中为当日截至当前的累计值，非交易时段为最近交易日收盘值
+                val_yuan = float(last_row["主力净流入-净额"])  # 单位：元
+                results.append({
+                    "code": stock["code"],
+                    "name": stock["name"],
+                    "value": round(val_yuan / 100000000, 2),  # 元 → 亿元
+                })
             else:
                 results.append({"code": stock["code"], "name": stock["name"], "value": 0})
         except Exception as e:
             print(f"⚠️ 获取{stock['name']}({stock['code']})失败: {e}")
             results.append({"code": stock["code"], "name": stock["name"], "value": 0})
-        time.sleep(STOCK_INTERVAL)      # 间隔防触发限制
+        time.sleep(STOCK_INTERVAL)      # 每只间隔2秒，防触发限制
     return results
 
 # ==================== 同花顺数据获取（核心数据源） ====================
@@ -400,16 +384,46 @@ def _collection_worker():
             top5 = sorted_items[:5]
             top5_str = ", ".join(f"{n}({v:+.1f})" for n, v in top5)
             print(f"✅ 收盘数据已保存 [241/241] TOP5: {top5_str}")
-            # 自动合并到每日数据库
-            print("🔄 自动合并分时数据到每日数据库...")
+            # 自动合并行业分时到每日数据库
+            print("🔄 自动合并行业分时数据到每日数据库...")
             try:
                 result, err = do_merge_intraday_to_daily()
                 if err:
-                    print(f"❌ 自动合并失败: {err}")
+                    print(f"❌ 行业自动合并失败: {err}")
                 else:
-                    print(f"✅ 自动合并成功! 共{len(result.get('time_points', []))}天数据")
+                    print(f"✅ 行业自动合并成功! 共{len(result.get('time_points', []))}天数据")
             except Exception as e:
-                print(f"❌ 自动合并异常: {e}")
+                print(f"❌ 行业自动合并异常: {e}")
+            # 收盘后也采集个股数据
+            if STOCK_LIST:
+                print(f"📈 收盘后采集{len([s for s in STOCK_LIST if s['code']])}只个股数据...")
+                stock_snapshot = _fetch_stock_snapshot()
+                if stock_snapshot:
+                    if not _stock_names:
+                        for s in STOCK_LIST:
+                            if s["code"]:
+                                _stock_names[s["code"]] = s["name"]
+                                _stock_values[s["code"]] = [0.0] * 241
+                    for i, s in enumerate(STOCK_LIST):
+                        if s["code"] and i < len(stock_snapshot):
+                            _stock_values[s["code"]][240] = stock_snapshot[i]["value"]
+                    stock_sectors = [{"code": s["code"], "name": s["name"], "values": _stock_values[s["code"]]}
+                                     for s in STOCK_LIST if s["code"]]
+                    save_stock_intraday(today, time_points, stock_sectors)
+                    stock_top3 = sorted([(s["name"], s["value"]) for s in stock_snapshot if s["code"]],
+                                       key=lambda x: x[1], reverse=True)[:3]
+                    stock_top3_str = ", ".join(f"{n}({v:+.1f})" for n, v in stock_top3)
+                    print(f"💾 个股数据已保存 | TOP3: {stock_top3_str}")
+                    # 自动合并个股到每日
+                    print("🔄 自动合并个股分时数据到每日数据库...")
+                    try:
+                        stock_result, stock_err = do_merge_stock_intraday_to_daily()
+                        if stock_err:
+                            print(f"❌ 个股自动合并失败: {stock_err}")
+                        else:
+                            print(f"✅ 个股自动合并成功!")
+                    except Exception as e:
+                        print(f"❌ 个股自动合并异常: {e}")
         else:
             print(f"❌ 收盘数据获取失败")
         _collection_active = False
@@ -580,7 +594,7 @@ def _collection_worker():
                 save_intraday(today, time_points, sectors)  # 保存到分时数据库
                 print(f"💾 行业数据已保存到数据库")
 
-                # ---- 个股数据采集（东方财富数据源） ----
+                # ---- 个股数据采集（akshare单股明细接口，每只1次请求+2s间隔） ----
                 if STOCK_LIST:          # 如果有配置个股
                     print(f"📈 开始采集{len([s for s in STOCK_LIST if s['code']])}只个股数据...")
                     stock_snapshot = _fetch_stock_snapshot()  # 逐只获取，每只间隔2秒
@@ -623,16 +637,27 @@ def _collection_worker():
     # _collection_active = False          # 标记采集不再活跃
     if _collection_idx >= 241:          # 如果完成了全部241个点
         print("✅ 分时采集完成! 241/241 点")
-        # 自动合并到每日数据库
-        print("🔄 自动合并分时数据到每日数据库...")
+        # 自动合并行业分时到每日数据库
+        print("🔄 自动合并行业分时数据到每日数据库...")
         try:
             result, err = do_merge_intraday_to_daily()
             if err:
-                print(f"❌ 自动合并失败: {err}")
+                print(f"❌ 行业自动合并失败: {err}")
             else:
-                print(f"✅ 自动合并成功! 共{len(result.get('time_points', []))}天数据")
+                print(f"✅ 行业自动合并成功! 共{len(result.get('time_points', []))}天数据")
         except Exception as e:
-            print(f"❌ 自动合并异常: {e}")
+            print(f"❌ 行业自动合并异常: {e}")
+        # 自动合并个股分时到每日数据库
+        if STOCK_LIST:
+            print("🔄 自动合并个股分时数据到每日数据库...")
+            try:
+                stock_result, stock_err = do_merge_stock_intraday_to_daily()
+                if stock_err:
+                    print(f"❌ 个股自动合并失败: {stock_err}")
+                else:
+                    print(f"✅ 个股自动合并成功!")
+            except Exception as e:
+                print(f"❌ 个股自动合并异常: {e}")
     else:                               # 被手动停止
         print(f"⛷ 分时采集已停止: {_collection_idx}/241 点")
 
