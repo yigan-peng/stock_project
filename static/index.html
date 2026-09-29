@@ -41,6 +41,8 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 #heatmapWrap{overflow-y:auto;overflow-x:auto}
 /* ===== 趋势分析容器：允许纵向滚动 ===== */
 #trendWrap{overflow-y:auto}
+/* ===== 全部个股容器：纵向弹性布局 ===== */
+#allstockWrap.active{display:flex;flex-direction:column}
 /* ===== 趋势分析卡片样式 ===== */
 .trend-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin:8px 14px;display:flex;align-items:center;gap:16px;transition:all .2s}
 .trend-card:hover{border-color:#58a6ff;background:#1c2333}
@@ -62,6 +64,11 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
 .range-btn{background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:3px;padding:2px 8px;font-size:10px;cursor:pointer;transition:all .2s}
 .range-btn:hover{background:#30363d;color:#c9d1d9}
 .range-btn.active{background:#1f6feb;color:#fff;border-color:#1f6feb}
+/* ===== 全部个股排序箭头 ===== */
+.allstock-sort-th:hover{color:#c9d1d9!important;background:#21262d}
+.allstock-sort-arrow{font-size:10px;margin-left:2px;color:#58a6ff}
+.allstock-sort-th.sort-asc .allstock-sort-arrow::before{content:'▲'}
+.allstock-sort-th.sort-desc .allstock-sort-arrow::before{content:'▼'}
 </style>
 </head>
 <body>
@@ -91,6 +98,7 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   <div class="tab" onclick="switchTab('stockDaily')">📉 个股每日</div>
   <div class="tab" onclick="switchTab('heatmap')">📊 资金热力图</div>
   <div class="tab" onclick="switchTab('trend')">🔮 趋势分析</div>
+  <div class="tab" onclick="switchTab('allstock')">📋 全部个股</div>
 </div>
 <!-- ===== 图表1：每日净流入 ===== -->
 <div class="chart-wrap active" id="dailyWrap">
@@ -162,6 +170,33 @@ body{background:#0d1117;height:100vh;font-family:"PingFang SC","Microsoft YaHei"
   </div>
   <div id="chartHeatmap" style="width:100%;height:100%;min-width:900px"></div>
 </div>
+<!-- ===== 图表：全部个股资金流 ===== -->
+<div class="chart-wrap" id="allstockWrap" style="overflow:auto">
+  <div style="padding:8px 14px;display:flex;align-items:center;gap:12px;flex-shrink:0">
+    <button class="btn-blue" id="btnAllstockStart" onclick="allstockStart()" style="color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer">▶ 开始采集</button>
+    <button class="btn-red" id="btnAllstockStop" onclick="allstockStop()" style="color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer" disabled>⏹ 停止</button>
+    <input type="text" id="allstockSearch" placeholder="搜索代码/名称..." oninput="allstockFilter()" style="padding:4px 10px;border:1px solid #30363d;border-radius:4px;background:#0d1117;color:#c9d1d9;font-size:12px;width:140px">
+    <span class="st" id="allstockStatus">未开始</span>
+    <span class="st" id="allstockProgress"></span>
+  </div>
+  <div style="overflow:auto;flex:1">
+    <table id="allstockTable" style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="position:sticky;top:0;background:#161b22;z-index:1">
+        <th style="padding:6px 8px;text-align:center;color:#58a6ff;border-bottom:1px solid #30363d">#</th>
+        <th class="allstock-sort-th" data-col="股票代码" style="padding:6px 8px;text-align:center;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">股票代码 <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="股票简称" data-type="str" style="padding:6px 8px;text-align:left;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">股票简称 <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="最新价" style="padding:6px 8px;text-align:right;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">最新价(元) <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="涨跌幅" style="padding:6px 8px;text-align:right;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">涨跌幅(%) <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="换手率" style="padding:6px 8px;text-align:right;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">换手率(%) <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="流入资金" style="padding:6px 8px;text-align:right;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">流入资金 <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="流出资金" style="padding:6px 8px;text-align:right;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">流出资金 <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="净额" style="padding:6px 8px;text-align:right;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">净额 <span class="allstock-sort-arrow"></span></th>
+        <th class="allstock-sort-th" data-col="成交额" style="padding:6px 8px;text-align:right;color:#58a6ff;border-bottom:1px solid #30363d;cursor:pointer;user-select:none">成交额 <span class="allstock-sort-arrow"></span></th>
+      </tr></thead>
+      <tbody id="allstockBody"><tr><td colspan="10" style="text-align:center;padding:40px;color:#8b949e">点击"开始采集"获取全部个股资金流</td></tr></tbody>
+    </table>
+  </div>
+</div>
 <!-- ===== 图表4：趋势分析 ===== -->
 <div class="chart-wrap" id="trendWrap">
   <div class="chart-title" id="trendChartTitle">🔮 趋势分析 · 近1个月</div>
@@ -213,11 +248,11 @@ function switchTab(name) {
   // 更新Tab按钮样式
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));  // 移除所有active
   const tabs = document.querySelectorAll('.tab');  // 获取所有tab
-  const tabMap = {daily:0, intraday:1, stockIntraday:2, stockDaily:3, heatmap:4, trend:5};
+  const tabMap = {daily:0, intraday:1, stockIntraday:2, stockDaily:3, heatmap:4, trend:5, allstock:6};
   if (tabMap[name] !== undefined) tabs[tabMap[name]].classList.add('active');
   // 更新图表容器显示
   document.querySelectorAll('.chart-wrap').forEach(w => w.classList.remove('active'));  // 隐藏所有图表
-  const wrapMap = {daily:'dailyWrap', intraday:'intradayWrap', stockIntraday:'stockIntradayWrap', stockDaily:'stockDailyWrap', heatmap:'heatmapWrap', trend:'trendWrap'};
+  const wrapMap = {daily:'dailyWrap', intraday:'intradayWrap', stockIntraday:'stockIntradayWrap', stockDaily:'stockDailyWrap', heatmap:'heatmapWrap', trend:'trendWrap', allstock:'allstockWrap'};
   if (wrapMap[name]) document.getElementById(wrapMap[name]).classList.add('active');
   // 切换后需要resize图表（ECharts需要重新计算尺寸）
   setTimeout(() => { chartDaily.resize(); chartIntraday.resize(); chartHeatmap.resize(); chartStockIntraday.resize(); chartStockDaily.resize(); }, 50);
@@ -235,6 +270,10 @@ function switchTab(name) {
   }
   if (name === 'stockDaily' && !stockDailyLoaded) {
     loadStockDailyData(currentStockDays);
+  }
+  // 切换到全部个股时自动加载数据
+  if (name === 'allstock') {
+    allstockLoadData();
   }
 }
 
@@ -1067,9 +1106,104 @@ document.querySelectorAll('[data-stock-days]').forEach(btn => {
   });
 });
 
+// ==================== 全部个股资金流 ====================
+let allstockData = [], allstockTimer = null, allstockLoaded = false;
+
+// 切换到全部个股Tab时自动加载数据
+function allstockLoadData() {
+  fetch('/api/allstock/data').then(r=>r.json()).then(j=>{
+    allstockData=j.data||[];
+    const s=j.status||{};
+    document.getElementById('allstockStatus').textContent=s.running?'采集中...':s.total_stocks>0?'已完成('+s.total_stocks+'只)':'未开始';
+    document.getElementById('allstockProgress').textContent=s.total_pages?(s.current_page+'/'+s.total_pages+'页'):'';
+    document.getElementById('btnAllstockStart').disabled=s.running;
+    document.getElementById('btnAllstockStop').disabled=!s.running;
+    allstockFilter();
+    if(s.running) allstockPoll();
+  });
+}
+function allstockFmtMoney(v) {
+  if (!v && v !== 0) return '-';
+  let s = String(v).replace(/[,，]/g,'');
+  let n = parseFloat(s);
+  if (isNaN(n)) return v;
+  // 处理原始数据中已带的"亿"/"万"单位
+  if (s.includes('亿')) n *= 1e8;
+  else if (s.includes('万')) n *= 1e4;
+  if (Math.abs(n)>=1e8) return (n/1e8).toFixed(2)+'亿';
+  if (Math.abs(n)>=1e4) return (n/1e4).toFixed(2)+'万';
+  return n.toFixed(2);
+}
+function allstockFmtPct(v) {
+  if (!v && v !== 0) return '-';
+  let n = parseFloat(String(v).replace('%',''));
+  return isNaN(n) ? v : n.toFixed(2)+'%';
+}
+function allstockCls(v) {
+  if (!v && v !== 0) return '';
+  let n = parseFloat(String(v).replace(/[,，%]/g,''));
+  return isNaN(n) ? '' : n>0 ? 'color:#ff4d4d' : n<0 ? 'color:#00c853' : 'color:#666';
+}
+function allstockRender(data) {
+  const tb = document.getElementById('allstockBody');
+  if (!data.length) { tb.innerHTML='<tr><td colspan="10" style="text-align:center;padding:40px;color:#8b949e">暂无数据</td></tr>'; return; }
+  let h = '';
+  for (let i=0;i<data.length;i++) {
+    const r=data[i];
+    h+='<tr style="border-bottom:1px solid #21262d">';
+    h+='<td style="padding:5px 8px;text-align:center;color:#8b949e">'+(i+1)+'</td>';
+    h+='<td style="padding:5px 8px;text-align:center;color:#aaa;font-family:monospace">'+(r['股票代码']||'-')+'</td>';
+    h+='<td style="padding:5px 8px;text-align:left;font-weight:bold;color:#c9d1d9">'+(r['股票简称']||'-')+'</td>';
+    h+='<td style="padding:5px 8px;text-align:right;'+allstockCls(r['最新价'])+'">'+(r['最新价']||'-')+'元</td>';
+    h+='<td style="padding:5px 8px;text-align:right;'+allstockCls(r['涨跌幅'])+'">'+allstockFmtPct(r['涨跌幅'])+'</td>';
+    h+='<td style="padding:5px 8px;text-align:right;color:#c9d1d9">'+allstockFmtPct(r['换手率'])+'</td>';
+    h+='<td style="padding:5px 8px;text-align:right;color:#ff4d4d">'+allstockFmtMoney(r['流入资金'])+'</td>';
+    h+='<td style="padding:5px 8px;text-align:right;color:#00c853">'+allstockFmtMoney(r['流出资金'])+'</td>';
+    h+='<td style="padding:5px 8px;text-align:right;'+allstockCls(r['净额'])+'">'+allstockFmtMoney(r['净额'])+'</td>';
+    h+='<td style="padding:5px 8px;text-align:right;color:#c9d1d9">'+allstockFmtMoney(r['成交额'])+'</td>';
+    h+='</tr>';
+  }
+  tb.innerHTML=h;
+}
+function allstockFilter() {
+  const kw=document.getElementById('allstockSearch').value.trim().toLowerCase();
+  if (!kw) { allstockRender(allstockData); return; }
+  allstockRender(allstockData.filter(r=>String(r['股票代码']||'').includes(kw)||String(r['股票简称']||'').toLowerCase().includes(kw)));
+}
+function allstockStart() {
+  fetch('/api/allstock/start',{method:'POST'}).then(r=>r.json()).then(j=>{
+    if(!j.ok){alert(j.msg);return;} allstockPoll();
+  });
+}
+function allstockStop() { fetch('/api/allstock/stop',{method:'POST'}); }
+function allstockPoll() {
+  if(allstockTimer) clearInterval(allstockTimer);
+  allstockTimer=setInterval(()=>{
+    fetch('/api/allstock/data').then(r=>r.json()).then(j=>{
+      allstockData=j.data||[];
+      const s=j.status||{};
+      document.getElementById('allstockStatus').textContent=s.running?'采集中...':s.total_stocks>0?'已完成('+s.total_stocks+'只)':'未开始';
+      document.getElementById('allstockProgress').textContent=s.total_pages?(s.current_page+'/'+s.total_pages+'页'):'';
+      document.getElementById('btnAllstockStart').disabled=s.running;
+      document.getElementById('btnAllstockStop').disabled=!s.running;
+      allstockFilter();
+      if(!s.running&&s.total_stocks>0){clearInterval(allstockTimer);allstockTimer=null;}
+    });
+  },2000);
+}
+// 页面加载时检查全部个股状态
+fetch('/api/allstock/data').then(r=>r.json()).then(j=>{
+  allstockData=j.data||[];
+  const s=j.status||{};
+  document.getElementById('allstockStatus').textContent=s.running?'采集中...':s.total_stocks>0?'已完成('+s.total_stocks+'只)':'未开始';
+  document.getElementById('allstockProgress').textContent=s.total_pages?(s.current_page+'/'+s.total_pages+'页'):'';
+  if(s.total_stocks>0) allstockFilter();
+  if(s.running) allstockPoll();
+});
+
 // ==================== 窗口resize时也resize个股图表 ====================
 window.addEventListener('resize', () => { chartStockIntraday.resize(); chartStockDaily.resize(); });
-     
+      
 </script>
 </body>
 </html>

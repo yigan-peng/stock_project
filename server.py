@@ -239,35 +239,101 @@ def _get_stock_session():
         })
     return _stock_session
 
+def _load_latest_allstock_net_flow():
+    """
+    从全部个股数据库(allstock.db)加载最近一天(今天优先，其次最近有数据的日期)
+    的 {股票代码: 主力净流入净额(元)} 字典。
+    用于个股追踪数据优先读库，避免启动/盘中反复拉取全市场5210只股票。
+    返回空字典 {} 表示数据库无数据。
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_ALLSTOCK)
+    c = conn.cursor()
+    load_date = today
+    # 优先今天，其次最近有数据的日期
+    row = c.execute("SELECT 1 FROM allstock_progress WHERE fetch_date=?", (today,)).fetchone()
+    if not row:
+        r2 = c.execute("SELECT fetch_date FROM allstock_progress ORDER BY fetch_date DESC LIMIT 1").fetchone()
+        if r2:
+            load_date = r2[0]
+        else:
+            conn.close()
+            return {}
+    rows = c.execute(
+        "SELECT stock_code, net_flow FROM allstock_data WHERE fetch_date=?", (load_date,)
+    ).fetchall()
+    conn.close()
+    result = {}
+    for code, net_flow in rows:
+        try:
+            result[code] = float(net_flow) if net_flow not in (None, "") else 0.0
+        except (ValueError, TypeError):
+            result[code] = 0.0
+    return result
+
 def _fetch_stock_snapshot():
     """
-    获取STOCK_LIST中所有有效个股的当天资金净流入（东方财富单股明细接口，akshare封装）
-    每只股票独立请求 1 次（共 len(STOCK_LIST) 次），每次间隔 STOCK_INTERVAL 秒防触发限制
-    不再使用同花顺整榜接口 stock_fund_flow_individual（内部分页 105 次请求，易触发限制）
+    获取STOCK_LIST中所有有效个股的资金净流入（亿元）
+    优先从全部个股数据库(allstock.db)读取最近一天的数据（启动/盘中不拉取全市场5210只），
+    数据库无数据时才实时请求同花顺全市场接口（保底，如首次运行）
     返回: [{"code":"000001","name":"平安银行","value":1.23}, ...] 按STOCK_LIST顺序
     code为空的条目会被跳过，但保留位置（value=0）
     """
     results = []
+    
+    # 先检查是否有有效股票需要获取
+    valid_stocks = [s for s in STOCK_LIST if s["code"]]
+    if not valid_stocks:
+        return [{"code": "", "name": "", "value": 0} for _ in STOCK_LIST]
+    
+    # 优先从数据库读取最近一天数据（交易日15:00自动获取后写入allstock.db）
+    db_data = _load_latest_allstock_net_flow()
+    if db_data:
+        # 按STOCK_LIST顺序返回结果
+        for stock in STOCK_LIST:
+            if not stock["code"]:
+                results.append({"code": "", "name": "", "value": 0})
+                continue
+            val_yuan = db_data.get(stock["code"], 0)
+            results.append({
+                "code": stock["code"],
+                "name": stock["name"],
+                "value": round(val_yuan / 100000000, 2),  # 元 → 亿元
+            })
+        print(f"✅ 从数据库读取个股数据: {len(results)} 只股票")
+        return results
+    
+    # 数据库无数据（首次运行等）：才实时请求一次全市场个股资金流数据（同花顺，保底）
+    all_stock_data = {}
+    try:
+        df = ak.stock_fund_flow_individual(symbol="即时")
+        if df is not None and not df.empty:
+            # 构建 {股票代码: 主力净流入} 字典
+            for _, row in df.iterrows():
+                code = str(row.get("股票代码", "")).strip()
+                val = row.get("主力净流入-净额", 0)
+                if code:
+                    try:
+                        all_stock_data[code] = float(val) if pd.notna(val) else 0
+                    except (ValueError, TypeError):
+                        all_stock_data[code] = 0
+            print(f"✅ 同花顺个股数据获取成功: {len(all_stock_data)} 只股票")
+    except Exception as e:
+        print(f"⚠️ 同花顺个股数据获取失败: {e}")
+    
+    # 按STOCK_LIST顺序返回结果
     for stock in STOCK_LIST:
-        if not stock["code"]:           # code为空跳过
+        if not stock["code"]:
             results.append({"code": "", "name": "", "value": 0})
             continue
-        try:
-            df = ak.stock_individual_fund_flow(stock=stock["code"], market=stock["market"])
-            if df is not None and not df.empty:
-                last_row = df.iloc[-1]  # 最新一行：盘中为当日截至当前的累计值，非交易时段为最近交易日收盘值
-                val_yuan = float(last_row["主力净流入-净额"])  # 单位：元
-                results.append({
-                    "code": stock["code"],
-                    "name": stock["name"],
-                    "value": round(val_yuan / 100000000, 2),  # 元 → 亿元
-                })
-            else:
-                results.append({"code": stock["code"], "name": stock["name"], "value": 0})
-        except Exception as e:
-            print(f"⚠️ 获取{stock['name']}({stock['code']})失败: {e}")
-            results.append({"code": stock["code"], "name": stock["name"], "value": 0})
-        time.sleep(STOCK_INTERVAL)      # 每只间隔2秒，防触发限制
+        
+        val_yuan = all_stock_data.get(stock["code"], 0)
+        results.append({
+            "code": stock["code"],
+            "name": stock["name"],
+            "value": round(val_yuan / 100000000, 2),  # 元 → 亿元
+        })
+    
     return results
 
 # ==================== 同花顺数据获取（核心数据源） ====================
@@ -437,48 +503,112 @@ def _collection_worker():
     existing = load_intraday()          # 从数据库加载当天分时数据
     if existing and existing["date"] == today:  # 如果有当天的数据
         # 恢复进度：从后往前找最后一个有数据的点
-        tp = existing["time_points"]    # 240个时间点列表
+        tp = existing["time_points"]    # 时间点列表
         sectors_data = existing["sectors"]  # 行业数据列表
         last_filled = -1                # 最后一个有数据的索引
-        for i in range(len(tp) - 1, -1, -1):  # 从最后一个点往前遍历
-            has_data = any(s["values"][i] != 0 for s in sectors_data)  # 检查该点是否有数据
+        # 修复：使用INTRADAY_POINTS的长度作为上限，避免数据库中存储了错误长度的数据
+        max_idx = min(len(tp), len(INTRADAY_POINTS)) - 1
+        for i in range(max_idx, -1, -1):  # 从最后一个点往前遍历
+            # 修复：添加对values数组长度的检查，避免越界
+            has_data = any(
+                i < len(s["values"]) and s["values"][i] != 0 
+                for s in sectors_data
+            )
             if has_data:                # 找到最后一个有数据的点
                 last_filled = i
                 break
-        # 下一采集索引：取“数据库最后填充点+1”和“当前时间对应索引”的较大值
+        # 下一采集索引：取"数据库最后填充点+1"和"当前时间对应索引"的较大值
         current_hm = f"{now.hour:02d}:{now.minute:02d}"
+        t_min_now = now.hour * 60 + now.minute
         time_idx = 0
-        for i, tp_str in enumerate(INTRADAY_POINTS):
-            if tp_str >= current_hm:
-                time_idx = i
-                break
-        else:
+        
+        # 修复：处理午休时间（11:31~12:59），应该等待到13:00继续采集
+        if t_min_now > 11*60+30 and t_min_now < 13*60:
+            # 午休时间，下一个采集点是13:00（索引120）
+            time_idx = 120  # 13:00在INTRADAY_POINTS中的索引
+            print(f"🕐 当前午休时间{current_hm}，下午盘13:00继续采集")
+        elif t_min_now >= 15*60:
+            # 已收盘
             time_idx = 241
-        _collection_idx = max(last_filled + 1, time_idx)  # 取较大值，确保不后退
-        last_time = tp[last_filled] if last_filled >= 0 else "无"
+        else:
+            for i, tp_str in enumerate(INTRADAY_POINTS):
+                if tp_str >= current_hm:
+                    time_idx = i
+                    break
+            else:
+                time_idx = 241
+        
+        # 修复：先修正last_filled边界，再计算_collection_idx（之前的顺序反了）
+        if last_filled >= len(INTRADAY_POINTS):
+            print(f"⚠️ 数据库last_filled={last_filled}超出范围(总点数{len(INTRADAY_POINTS)})，修正为{len(INTRADAY_POINTS)-1}")
+            last_filled = len(INTRADAY_POINTS) - 1
+        
+        # 修复：检测数据库数据是否异常（last_filled超出当前时间应有的进度）
+        # 如果数据库记录的最后填充点 > 当前时间对应的索引，说明数据异常
+        db_progress = last_filled + 1
+        if db_progress > time_idx and time_idx < 241:
+            # 数据库进度超前于当前时间，数据可能损坏
+            print(f"⚠️ 检测到数据库数据异常: 数据库记录进度={db_progress}/241, 但当前时间{current_hm}应对应索引{time_idx}")
+            print(f"🔄 忽略数据库异常进度，使用当前时间索引: {time_idx}")
+            _collection_idx = time_idx
+        else:
+            _collection_idx = max(last_filled + 1, time_idx)  # 正常情况取较大值
+        
+        # 修复：确保_collection_idx不超过有效范围（0~241）
+        if _collection_idx > len(INTRADAY_POINTS):
+            _collection_idx = len(INTRADAY_POINTS)
+        # 修复：添加边界检查，避免tp[last_filled]越界
+        last_time = tp[last_filled] if 0 <= last_filled < len(tp) else "无"
+        
+        # 修复：如果_collection_idx已经>=241，说明当天采集已完成
+        if _collection_idx >= len(INTRADAY_POINTS):
+            print(f"✅ 当天分时采集已完成: 数据库已有{last_filled+1}/241个数据点，无需继续采集")
+            _collection_active = False
+            return
         print(f"📂 恢复分时进度: 数据库最后填充={last_filled+1}/241(时间{last_time}), 当前时间={current_hm}(索引{time_idx}), 下一采集={_collection_idx+1}/241")
     else:
         # 首次启动：找到当前时间对应的索引，之前的点留0
         current_hm = f"{now.hour:02d}:{now.minute:02d}"  # 当前北京时间
+        t_min_now = now.hour * 60 + now.minute
         _collection_idx = 0             # 默认从0开始
-        for i, tp in enumerate(INTRADAY_POINTS):
-            if tp >= current_hm:        # 找到第一个 >= 当前时间的点
-                _collection_idx = i
-                break
+        
+        # 修复：处理午休时间（11:31~12:59），应该等待到13:00继续采集
+        if t_min_now > 11*60+30 and t_min_now < 13*60:
+            # 午休时间，下一个采集点是13:00（索引120）
+            _collection_idx = 120  # 13:00在INTRADAY_POINTS中的索引
+            print(f"🕐 当前午休时间{current_hm}，下午盘13:00开始采集")
+        elif t_min_now >= 15*60:
+            # 已收盘
+            _collection_idx = 241
         else:
-            _collection_idx = 241       # 所有点都已过去
-        if _collection_idx > 0:
+            for i, tp in enumerate(INTRADAY_POINTS):
+                if tp >= current_hm:        # 找到第一个 >= 当前时间的点
+                    _collection_idx = i
+                    break
+            else:
+                _collection_idx = 241       # 所有点都已过去
+        
+        if 0 < _collection_idx < 241:
             print(f"⏩ 跳过已过去的 {_collection_idx} 个点 (09:31~{INTRADAY_POINTS[_collection_idx-1]})，从 {INTRADAY_POINTS[_collection_idx]} 开始采集")
 
     # --- 初始化数据容器 ---
-    time_points = list(INTRADAY_POINTS)  # 固定240个时间标签
+    time_points = list(INTRADAY_POINTS)  # 固定241个时间标签
     all_names = []                      # 行业名列表（首次采集时确定）
-    name_values = {}                    # {行业名: [240个数值]} 存放所有行业的所有数据
+    name_values = {}                    # {行业名: [241个数值]} 存放所有行业的所有数据
     # 恢复已有数据：从数据库加载到内存，避免被覆盖为0
     if existing and existing["date"] == today and existing["sectors"]:
         for s in existing["sectors"]:   # 遍历数据库中的每个行业
             all_names.append(s["name"])  # 恢复行业名
-            name_values[s["name"]] = list(s["values"])  # 恢复240个数值（保留已有数据）
+            name_values[s["name"]] = list(s["values"])  # 恢复241个数值（保留已有数据）
+
+    # --- 恢复个股数据：从数据库加载到内存（断点续采） ---
+    stock_existing = load_stock_intraday()  # 从数据库加载当天个股分时数据
+    if stock_existing and stock_existing["date"] == today and stock_existing.get("stocks"):
+        print(f"📂 恢复个股数据: {len(stock_existing['stocks'])} 只股票")
+        for s in stock_existing["stocks"]:  # 遍历数据库中的每只股票
+            code = s["code"]
+            _stock_names[code] = s["name"]  # 恢复股票名称
+            _stock_values[code] = list(s["values"])  # 恢复241个数值（保留已有数据）
 
     # --- 主采集循环：根据实际时间动态定位索引，每分钟采集一次 ---
     _collection_total = 241             # 固定241个点
@@ -861,6 +991,8 @@ async def _check_collection_alive():
 async def lifespan(app: FastAPI):
     init_db()                           # 初始化行业数据库（创建表）
     init_stock_db()                     # 初始化个股数据库（创建表）
+    _init_allstock_db()                 # 初始化全部个股数据库（创建表）
+    _load_allstock_from_db()            # 从数据库加载今天已有的全部个股数据
     # 启动时自动开始分时采集
     ok, msg = start_collection()
     if ok:
@@ -870,6 +1002,8 @@ async def lifespan(app: FastAPI):
     # 启动后台监控任务：定期检查采集线程是否存活
     import asyncio as _asyncio
     _asyncio.create_task(_check_collection_alive())
+    # 启动后台任务：交易日每天15:00收盘后自动获取全部个股数据
+    _asyncio.create_task(_auto_fetch_allstock_loop())
     yield                               # 应用运行中...
     # （应用关闭后的清理代码可以写在这里）
 
@@ -1721,6 +1855,330 @@ def do_merge_stock_intraday_to_daily():
 
     print(f"✅ 个股分时数据已合并到每日: {len(intraday['stocks'])} 只股票 × 241个时间点 | 共{len(records)}天数据")
     return result, None
+
+# ==================== 全部个股资金流（独立模块，与现有功能解耦） ====================
+DB_ALLSTOCK = "allstock.db"             # 全部个股资金流数据库文件名
+_all_stock_flow_data = []          # 内存中缓存的全部个股数据列表
+_all_stock_flow_status = {
+    "running": False,               # 是否正在采集
+    "total_pages": 0,               # 总页数
+    "current_page": 0,              # 当前已采集到第几页
+    "total_stocks": 0,              # 已获取的股票数量
+    "last_update": "",              # 最后更新时间
+    "error": "",                    # 错误信息
+    "is_complete": False,           # 本轮采集是否已全部完成
+}
+_all_stock_flow_thread = None       # 后台采集线程
+
+
+def _init_allstock_db():
+    """初始化全部个股数据库，创建表结构"""
+    conn = sqlite3.connect(DB_ALLSTOCK)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS allstock_data (
+            fetch_date TEXT NOT NULL,
+            page_num INTEGER NOT NULL,
+            stock_code TEXT NOT NULL,
+            stock_name TEXT,
+            price TEXT,
+            change_pct TEXT,
+            turnover_rate TEXT,
+            flow_in TEXT,
+            flow_out TEXT,
+            net_flow TEXT,
+            turnover TEXT,
+            PRIMARY KEY (fetch_date, stock_code)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS allstock_progress (
+            fetch_date TEXT PRIMARY KEY,
+            total_pages INTEGER DEFAULT 0,
+            current_page INTEGER DEFAULT 0,
+            total_stocks INTEGER DEFAULT 0,
+            last_update TEXT DEFAULT '',
+            is_complete INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _load_allstock_from_db():
+    """从数据库加载最近一次的全部个股数据到内存（优先今天，其次最近有数据的日期）"""
+    global _all_stock_flow_data, _all_stock_flow_status
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_ALLSTOCK)
+    c = conn.cursor()
+
+    # 优先加载今天的数据，如果没有则加载最近有数据的日期
+    load_date = today
+    c.execute("SELECT total_pages, current_page, total_stocks, last_update, is_complete FROM allstock_progress WHERE fetch_date=?", (today,))
+    row = c.fetchone()
+    if not row:
+        # 今天没有数据，查找最近有数据的日期
+        c.execute("SELECT fetch_date, total_pages, current_page, total_stocks, last_update, is_complete FROM allstock_progress ORDER BY fetch_date DESC LIMIT 1")
+        row2 = c.fetchone()
+        if row2:
+            load_date = row2[0]
+            row = row2[1:]  # 去掉fetch_date字段
+
+    if row:
+        _all_stock_flow_status["total_pages"] = row[0]
+        _all_stock_flow_status["current_page"] = row[1]
+        _all_stock_flow_status["total_stocks"] = row[2]
+        _all_stock_flow_status["last_update"] = row[3]
+        _all_stock_flow_status["is_complete"] = bool(row[4])
+
+    # 加载数据
+    c.execute("SELECT stock_code, stock_name, price, change_pct, turnover_rate, flow_in, flow_out, net_flow, turnover FROM allstock_data WHERE fetch_date=? ORDER BY CAST(NULLIF(change_pct,'') AS REAL) DESC", (load_date,))
+    rows = c.fetchall()
+    _all_stock_flow_data = [
+        {"股票代码": r[0], "股票简称": r[1], "最新价": r[2], "涨跌幅": r[3],
+         "换手率": r[4], "流入资金": r[5], "流出资金": r[6], "净额": r[7], "成交额": r[8]}
+        for r in rows
+    ]
+    conn.close()
+    if _all_stock_flow_data:
+        print(f"📂 从数据库加载全部个股数据: {len(_all_stock_flow_data)} 只股票 ({load_date}, 第{_all_stock_flow_status['current_page']}/{_all_stock_flow_status['total_pages']}页)")
+
+
+def _save_allstock_page_to_db(page_num, rows, today):
+    """将一页的数据保存到数据库"""
+    conn = sqlite3.connect(DB_ALLSTOCK)
+    c = conn.cursor()
+    for row in rows:
+        c.execute("""
+            INSERT OR REPLACE INTO allstock_data (fetch_date, page_num, stock_code, stock_name, price, change_pct, turnover_rate, flow_in, flow_out, net_flow, turnover)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (today, page_num, row["股票代码"], row["股票简称"], str(row["最新价"]),
+              str(row["涨跌幅"]), str(row["换手率"]), str(row["流入资金"]),
+              str(row["流出资金"]), str(row["净额"]), str(row["成交额"])))
+    conn.commit()
+    conn.close()
+
+
+def _save_allstock_progress(today):
+    """保存采集进度到数据库"""
+    conn = sqlite3.connect(DB_ALLSTOCK)
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO allstock_progress (fetch_date, total_pages, current_page, total_stocks, last_update, is_complete)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (today, _all_stock_flow_status["total_pages"], _all_stock_flow_status["current_page"],
+          _all_stock_flow_status["total_stocks"], _all_stock_flow_status["last_update"],
+          1 if _all_stock_flow_status["is_complete"] else 0))
+    conn.commit()
+    conn.close()
+
+
+def _fetch_all_stock_flow_worker(start_page=1):
+    """
+    后台线程：分页请求同花顺全部个股资金流数据
+    - 支持断点续采：从 start_page 开始
+    - 每页间隔10秒，均匀获取
+    - 每获取一页就实时写入数据库并更新内存缓存
+    """
+    global _all_stock_flow_data, _all_stock_flow_status
+
+    _all_stock_flow_status["running"] = True
+    _all_stock_flow_status["error"] = ""
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if start_page > 1:
+        print(f"🔄 断点续采：从第 {start_page} 页继续获取全部个股资金流数据...")
+    else:
+        print("🚀 开始获取全部个股资金流数据...")
+
+    try:
+        # --- 第1步：请求第1页，获取总页数 ---
+        v_code = _get_v_code()
+        headers = {
+            "Accept": "text/html, */*; q=0.01",
+            "hexin-v": v_code,
+            "Host": "data.10jqka.com.cn",
+            "Referer": "http://data.10jqka.com.cn/funds/hyzjl/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        first_url = "http://data.10jqka.com.cn/funds/ggzjl/field/code/order/desc/ajax/1/free/1/"
+        r = requests.get(first_url, headers=headers, timeout=15)
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, features="lxml")
+        page_info = soup.find(name="span", attrs={"class": "page_info"})
+        if page_info:
+            total_pages = int(page_info.text.split("/")[1])
+        else:
+            total_pages = 1
+        _all_stock_flow_status["total_pages"] = total_pages
+        print(f"📄 总页数: {total_pages}")
+
+        # --- 第2步：逐页请求，每页间隔10秒 ---
+        page_url_tpl = "http://data.10jqka.com.cn/funds/ggzjl/field/zdf/order/desc/page/{}/ajax/1/free/1/"
+
+        for page in range(start_page, total_pages + 1):
+            if not _all_stock_flow_status["running"]:
+                print(f"⏹️ 全部个股采集被手动停止 (已采集到第 {page-1} 页，数据已保存)")
+                break
+
+            # 每页重新生成验证码
+            v_code = _get_v_code()
+            headers["hexin-v"] = v_code
+
+            try:
+                r = requests.get(page_url_tpl.format(page), headers=headers, timeout=15)
+                temp_df = pd.read_html(StringIO(r.text))[0]
+                # 删除序号列
+                if "序号" in temp_df.columns:
+                    del temp_df["序号"]
+                # 统一列名
+                temp_df.columns = ["股票代码", "股票简称", "最新价", "涨跌幅", "换手率", "流入资金", "流出资金", "净额", "成交额"]
+                page_rows = [row.to_dict() for _, row in temp_df.iterrows()]
+
+                # 实时写入数据库
+                _save_allstock_page_to_db(page_num=page, rows=page_rows, today=today)
+
+                # 实时更新内存缓存（从数据库重新加载，保证排序一致）
+                _load_allstock_from_db()
+
+                _all_stock_flow_status["current_page"] = page
+                _all_stock_flow_status["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                _all_stock_flow_status["is_complete"] = False
+                # 保存进度
+                _save_allstock_progress(today)
+                print(f"  📥 第 {page}/{total_pages} 页完成，累计 {len(_all_stock_flow_data)} 只股票")
+
+            except Exception as e:
+                print(f"  ⚠️ 第 {page} 页请求失败: {e}")
+                _all_stock_flow_status["error"] = f"第{page}页失败: {e}"
+
+            # 非最后一页，等待10秒
+            if page < total_pages and _all_stock_flow_status["running"]:
+                time.sleep(10)
+
+        # --- 第3步：标记完成 ---
+        if _all_stock_flow_status["current_page"] >= total_pages:
+            _all_stock_flow_status["is_complete"] = True
+            _all_stock_flow_status["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_allstock_progress(today)
+            print(f"✅ 全部个股数据获取完成: {len(_all_stock_flow_data)} 只股票")
+
+    except Exception as e:
+        _all_stock_flow_status["error"] = str(e)
+        print(f"❌ 全部个股采集失败: {e}")
+    finally:
+        _all_stock_flow_status["running"] = False
+
+
+async def _auto_fetch_allstock_loop():
+    """
+    后台任务：交易日每天15:00收盘后自动获取全部个股数据(约5210只)，每天仅一次。
+    服务启动/盘中只读数据库不拉取全市场；仅在交易日15:00后、且今天未采集完成时自动触发。
+    """
+    global _all_stock_flow_data, _all_stock_flow_thread, _all_stock_flow_status
+    while True:
+        try:
+            now = datetime.now()
+            is_weekday = now.weekday() < 5
+            t_min = now.hour * 60 + now.minute
+            if is_weekday and t_min >= 15 * 60 and not _all_stock_flow_status["running"]:
+                today = now.strftime("%Y-%m-%d")
+                # 检查今天是否已完成采集
+                conn = sqlite3.connect(DB_ALLSTOCK)
+                row = conn.execute(
+                    "SELECT is_complete FROM allstock_progress WHERE fetch_date=?", (today,)
+                ).fetchone()
+                conn.close()
+                if not row or not row[0]:
+                    # 今天未完成 → 自动启动（全新开始或断点续采）
+                    start_page = 1
+                    if _all_stock_flow_status["current_page"] > 0 and not _all_stock_flow_status["is_complete"]:
+                        start_page = _all_stock_flow_status["current_page"] + 1
+                        print(f"🕒 交易日收盘自动获取：从第 {start_page} 页断点续采全部个股数据...")
+                    else:
+                        # 全新开始：清空今天的旧数据
+                        conn2 = sqlite3.connect(DB_ALLSTOCK)
+                        c = conn2.cursor()
+                        c.execute("DELETE FROM allstock_data WHERE fetch_date=?", (today,))
+                        c.execute("DELETE FROM allstock_progress WHERE fetch_date=?", (today,))
+                        conn2.commit()
+                        conn2.close()
+                        _all_stock_flow_data = []
+                        _all_stock_flow_status = {
+                            "running": False, "total_pages": 0, "current_page": 0,
+                            "total_stocks": 0, "last_update": "", "error": "", "is_complete": False,
+                        }
+                        print("🕒 交易日收盘(15:00)自动获取全部个股数据...")
+                    _all_stock_flow_status["running"] = True
+                    _all_stock_flow_thread = threading.Thread(
+                        target=_fetch_all_stock_flow_worker, args=(start_page,), daemon=True
+                    )
+                    _all_stock_flow_thread.start()
+        except Exception as e:
+            print(f"⚠️ 自动获取全部个股数据检查异常: {e}")
+        await asyncio.sleep(60)
+
+
+@app.post("/api/allstock/start")
+async def allstock_start():
+    """启动全部个股数据采集（支持断点续采）"""
+    global _all_stock_flow_thread, _all_stock_flow_status
+    if _all_stock_flow_status["running"]:
+        return {"ok": False, "msg": "采集已在进行中"}
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # 判断是否需要断点续采
+    start_page = 1
+    if _all_stock_flow_status["current_page"] > 0 and not _all_stock_flow_status["is_complete"]:
+        # 有未完成的进度，从下一页继续
+        start_page = _all_stock_flow_status["current_page"] + 1
+        msg = f"断点续采：从第 {start_page} 页继续"
+    else:
+        # 全新开始或上次已完成：清空今天的数据重新采集
+        conn = sqlite3.connect(DB_ALLSTOCK)
+        c = conn.cursor()
+        c.execute("DELETE FROM allstock_data WHERE fetch_date=?", (today,))
+        c.execute("DELETE FROM allstock_progress WHERE fetch_date=?", (today,))
+        conn.commit()
+        conn.close()
+        global _all_stock_flow_data
+        _all_stock_flow_data = []
+        _all_stock_flow_status = {
+            "running": False, "total_pages": 0, "current_page": 0,
+            "total_stocks": 0, "last_update": "", "error": "", "is_complete": False,
+        }
+        msg = "采集已启动（全新开始）"
+
+    _all_stock_flow_status["running"] = True
+    _all_stock_flow_thread = threading.Thread(target=_fetch_all_stock_flow_worker, args=(start_page,), daemon=True)
+    _all_stock_flow_thread.start()
+    return {"ok": True, "msg": msg}
+
+
+@app.post("/api/allstock/stop")
+async def allstock_stop():
+    """停止全部个股数据采集（已获取的数据保留在数据库中）"""
+    global _all_stock_flow_status
+    _all_stock_flow_status["running"] = False
+    return {"ok": True, "msg": f"采集已停止，已获取 {_all_stock_flow_status['total_stocks']} 只股票数据已保存"}
+
+
+@app.get("/api/allstock/status")
+async def allstock_status():
+    """获取采集状态"""
+    return _all_stock_flow_status
+
+
+@app.get("/api/allstock/data")
+async def allstock_data():
+    """获取全部个股数据（从内存缓存读取，包含实时采集的增量数据）"""
+    return {
+        "data": _all_stock_flow_data,
+        "status": _all_stock_flow_status,
+    }
+
 
 # ==================== 程序入口 ====================
 if __name__ == "__main__":              # 直接运行此文件时执行
