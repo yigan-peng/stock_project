@@ -989,6 +989,13 @@ async def _check_collection_alive():
                     print(f"❌ 采集线程重启失败: {msg}")
 
 async def lifespan(app: FastAPI):
+    # ===== 版本信息打印 =====
+    print("=" * 50)
+    print("📊 行业资金流向系统")
+    print("📅 20260930 V1.0.0")
+    print("=" * 50)
+    # ========================
+    
     init_db()                           # 初始化行业数据库（创建表）
     init_stock_db()                     # 初始化个股数据库（创建表）
     _init_allstock_db()                 # 初始化全部个股数据库（创建表）
